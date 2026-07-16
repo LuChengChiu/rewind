@@ -5,7 +5,7 @@ from textual.widgets import Input
 
 from session_vault.app import SessionCard, VaultApp
 
-FIXTURES = Path(__file__).parent.parent / "fixtures"
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from session_vault.vault import (
     relative_time,
 )
 
-FIXTURES = Path(__file__).parent.parent / "fixtures"
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_load_vault_sorted_newest_first():
@@ -16,18 +16,18 @@ def test_load_vault_sorted_newest_first():
     assert len(sessions) == 3
     dated = [s for s in sessions if s.captured_at is not None]
     assert dated == sorted(dated, key=lambda s: s.captured_at, reverse=True)
-    assert sessions[0].title == "Logger facade PRD 討論"
+    assert sessions[0].title == "Logger facade PRD discussion"
 
 
 def test_resume_commands_rendered_from_raw_fields():
     by_harness = {s.harness: s for s in load_vault(FIXTURES) if not s.error}
     assert (
         by_harness["claude-code"].resume_command
-        == "claude --resume 3f2a8b1c-9d4e-4f6a-b7c8-1a2b3c4d5e6f"
+        == "claude --resume 11111111-2222-4333-8444-555555555555"
     )
     assert (
         by_harness["opencode"].resume_command
-        == "opencode -s ses_09b5cd917ffeGvRyYdTUOYoSNN"
+        == "opencode -s ses_examplefixture0000000001"
     )
 
 
@@ -54,7 +54,7 @@ def test_fuzzy_filter():
     logger = next(s for s in sessions if "Logger" in s.title)
     assert fuzzy_match("lgfcd", "logger facade")
     assert matches("logger prd", logger)
-    assert matches("blndvsn", logger)
+    assert matches("pymnts", logger)
     assert not matches("opencode", logger)
     assert matches("", logger)
 
