@@ -191,10 +191,21 @@ class VaultApp(App):
                 query, card.session
             )
 
+    _quit_pending = False
+
     def action_quit_with_toast(self) -> None:
-        # Show a brief notice, then exit — both ctrl+c and ctrl+q land here.
-        self.notify("Quitting…", title="Rewind")
-        self.set_timer(0.4, self.exit)
+        # First press warns, second press within 2s actually quits. Both
+        # ctrl+c and ctrl+q land here.
+        if self._quit_pending:
+            self.notify("Quitting…", title="Rewind")
+            self.set_timer(0.4, self.exit)
+            return
+        self._quit_pending = True
+        self.notify("Press again to quit", title="Rewind")
+        self.set_timer(2.0, self._reset_quit_pending)
+
+    def _reset_quit_pending(self) -> None:
+        self._quit_pending = False
 
 
 def main() -> None:
