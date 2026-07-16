@@ -6,6 +6,8 @@ Click a card (or press Enter on it) to copy the resume command.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 from rich.markup import escape
@@ -24,6 +26,46 @@ HARNESS_BADGES = {
     "claude-code": ("claude code", PALETTE["orange"]),
     "opencode": ("opencode", PALETTE["stardust"]),
 }
+
+
+def _is_wide(char: str) -> bool:
+    return unicodedata.east_asian_width(char) in ("W", "F")
+
+
+def _needs_space(left: str, right: str) -> bool:
+    """Whether a line break between these two characters should become a space.
+
+    CJK runs close up (行 + 第), and full-width punctuation never takes a
+    trailing space (、+ OSC). But CJK against Latin does take one, because
+    that is how the summaries are written: "已 symlink 進 ~/.claude".
+    """
+    if not _is_wide(left):
+        return True
+    if unicodedata.category(left).startswith("P"):
+        return False
+    return not _is_wide(right)
+
+
+def reflow(text: str) -> str:
+    """Drop the line breaks the capture skill wrote, keeping paragraph breaks.
+
+    The vault file stores the summary exactly as authored, wrapped at whatever
+    column the writer happened to use. The card is responsive, so it has to do
+    its own wrapping — same split as H2, where storage stays raw and the TUI
+    renders. A break after a full-width character joins with no space (the
+    author never intended one there); everything else gets the space back.
+    """
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+    joined = []
+    for paragraph in paragraphs:
+        lines = [line.strip() for line in paragraph.split("\n") if line.strip()]
+        if not lines:
+            continue
+        out = lines[0]
+        for line in lines[1:]:
+            out += (" " if _needs_space(out[-1], line[0]) else "") + line
+        joined.append(out)
+    return "\n\n".join(joined)
 
 
 class SessionCard(Static, can_focus=True):
@@ -59,7 +101,7 @@ class SessionCard(Static, can_focus=True):
         yield Label(header, classes="card-meta")
         yield Label(f"cd {escape(s.cwd)}", classes="card-cwd")
         if s.summary:
-            yield Label(escape(s.summary), classes="card-summary")
+            yield Label(escape(reflow(s.summary)), classes="card-summary")
         if s.tags:
             yield Label(
                 " ".join(f"#{escape(t)}" for t in s.tags), classes="card-tags"
@@ -113,10 +155,13 @@ class VaultApp(App):
     }
     #cards {
         padding: 0 1;
+        align-horizontal: center;
     }
     SessionCard {
         background: $surface;
         border: round $surface-lighten-2;
+        width: 90%;
+        max-width: 80;
         padding: 0 1;
         margin-bottom: 1;
         height: auto;
@@ -144,6 +189,10 @@ class VaultApp(App):
     .card-summary {
         color: $text-muted;
         margin-top: 1;
+        /* Label is width:auto by default, which shrink-wraps and overflows.
+           The summary has no authored line breaks left, so it needs a width
+           to wrap into. */
+        width: 100%;
     }
     .card-tags {
         color: $text-muted;
