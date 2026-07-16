@@ -155,7 +155,7 @@ class VaultApp(App):
     }
     #cards {
         padding: 0 1;
-        align-horizontal: center;
+        align-horizontal: left;
     }
     SessionCard {
         background: $surface;
