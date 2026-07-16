@@ -15,6 +15,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Input, Label, Static
 
 from .theme import BITCOIN_DEFI, PALETTE
+from .update import maybe_update_in_background
 from .vault import Session, load_vault, matches, relative_time
 
 # harness -> (badge label, reverse-video chip color). Colors come from the
@@ -210,6 +211,8 @@ class VaultApp(App):
 
 def main() -> None:
     VaultApp().run()
+    # After the TUI is down, never before it — see session_vault/update.py.
+    maybe_update_in_background()
 
 
 if __name__ == "__main__":

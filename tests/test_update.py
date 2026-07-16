@@ -69,9 +69,7 @@ def world(tmp_path, monkeypatch):
         popen_raises=None,
         spawns=[],
         run_calls=[],
-        stamp=tmp_path / "cache" / "rewind" / "last-update-check",
-        result=tmp_path / "cache" / "rewind" / "last-update.json",
-        log=tmp_path / "cache" / "rewind" / "last-update.log",
+        paths=update.CachePaths.under(tmp_path / "cache"),
         prefix=prefix,
         uv="/usr/bin/uv",
     )
@@ -123,18 +121,15 @@ def world(tmp_path, monkeypatch):
         types.SimpleNamespace(which=lambda name: state.uv if name == "uv" else None),
     )
     monkeypatch.setattr(update, "sys", types.SimpleNamespace(prefix=str(prefix)))
-    monkeypatch.setattr(update, "STAMP", state.stamp)
-    monkeypatch.setattr(update, "RESULT", state.result)
-    monkeypatch.setattr(update, "LOG", state.log)
     monkeypatch.delenv("REWIND_NO_UPDATE", raising=False)
     return state
 
 
 def _stamp_aged(state, seconds):
-    state.stamp.parent.mkdir(parents=True, exist_ok=True)
-    state.stamp.touch()
+    state.paths.stamp.parent.mkdir(parents=True, exist_ok=True)
+    state.paths.stamp.touch()
     old = time.time() - seconds
-    os.utime(state.stamp, (old, old))
+    os.utime(state.paths.stamp, (old, old))
 
 
 # --- provenance: who is allowed to be overwritten ----------------------------
@@ -199,24 +194,46 @@ def test_unreadable_tool_dir_is_not_managed(world):
     assert update._is_managed_install(world.uv) is False
 
 
+# --- where the files land ----------------------------------------------------
+
+
+def test_cache_paths_follow_xdg_then_fall_back_home(monkeypatch, tmp_path):
+    # app.py calls maybe_update_in_background() with no paths, so this default
+    # is the only one that ever runs for real.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert update._default_cache_paths() == update.CachePaths.under(tmp_path / "xdg")
+
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    monkeypatch.setattr(update.Path, "home", classmethod(lambda cls: tmp_path / "h"))
+    assert update._default_cache_paths() == update.CachePaths.under(
+        tmp_path / "h" / ".cache"
+    )
+
+
+def test_cache_paths_share_one_directory(tmp_path):
+    paths = update.CachePaths.under(tmp_path)
+    parents = {p.parent for p in (paths.stamp, paths.result, paths.log)}
+    assert parents == {tmp_path / "rewind"}
+
+
 # --- the once-a-day gate -----------------------------------------------------
 
 
 def test_due_only_after_the_interval(world):
-    assert update._due() is True  # no stamp yet
+    assert update._due(world.paths) is True  # no stamp yet
 
     _stamp_aged(world, 60)
-    assert update._due() is False
+    assert update._due(world.paths) is False
 
     _stamp_aged(world, update.CHECK_INTERVAL + 60)
-    assert update._due() is True
+    assert update._due(world.paths) is True
 
 
 # --- maybe_update_in_background ----------------------------------------------
 
 
 def test_updates_a_managed_install(world):
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
 
     [(argv, kwargs)] = world.spawns
     assert argv[:2] == ["/bin/sh", "-c"]
@@ -226,7 +243,28 @@ def test_updates_a_managed_install(world):
     assert kwargs["stdin"] == subprocess.DEVNULL
     assert kwargs["stdout"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.DEVNULL
-    assert world.stamp.exists()
+    assert world.paths.stamp.exists()
+
+
+def test_a_dead_child_leaves_no_stale_success(world):
+    # The gap the record exists to close. Only the child writes an outcome, and
+    # a child can die without writing one -- so yesterday's success must not be
+    # left sitting there reading as "updated fine, moments ago".
+    world.paths.result.parent.mkdir(parents=True, exist_ok=True)
+    yesterday = {
+        "attempted_at": "2026-07-15T09:00:00Z",
+        "finished_at": "2026-07-15T09:00:04Z",
+        "exit_code": 0,
+    }
+    world.paths.result.write_text(json.dumps(yesterday) + "\n")
+
+    update.maybe_update_in_background(world.paths)  # spawns; the child never runs
+
+    assert world.spawns  # it really did try
+    record = json.loads(world.paths.result.read_text())
+    assert "exit_code" not in record  # nothing finished, so nothing claims to have
+    assert "finished_at" not in record
+    assert record["attempted_at"] != yesterday["attempted_at"]
 
 
 def test_update_script_records_how_it_went(world, tmp_path):
@@ -235,34 +273,37 @@ def test_update_script_records_how_it_went(world, tmp_path):
     stub = tmp_path / "uv"
     stub.write_text("#!/bin/sh\necho 'fatal: could not read from remote' >&2\nexit 128\n")
     stub.chmod(0o755)
-    world.result.parent.mkdir(parents=True, exist_ok=True)
+    world.paths.result.parent.mkdir(parents=True, exist_ok=True)
 
-    script = update._update_script(str(stub))
+    script = update._update_script(str(stub), world.paths, "2026-07-16T09:00:00Z")
     subprocess.run(["/bin/sh", "-c", script], check=True)
 
-    assert json.loads(world.result.read_text())["exit_code"] == 128
-    assert "could not read from remote" in world.log.read_text()
+    record = json.loads(world.paths.result.read_text())
+    assert record["exit_code"] == 128
+    assert record["attempted_at"] == "2026-07-16T09:00:00Z"  # carried through
+    assert "could not read from remote" in world.paths.log.read_text()
 
 
 def test_update_script_reports_success_and_truncates_the_log(world, tmp_path):
     stub = tmp_path / "uv"
     stub.write_text("#!/bin/sh\nexit 0\n")
     stub.chmod(0o755)
-    world.log.parent.mkdir(parents=True, exist_ok=True)
-    world.log.write_text("noise from a previous failed run\n")
+    world.paths.log.parent.mkdir(parents=True, exist_ok=True)
+    world.paths.log.write_text("noise from a previous failed run\n")
 
-    subprocess.run(["/bin/sh", "-c", update._update_script(str(stub))], check=True)
+    script = update._update_script(str(stub), world.paths, "2026-07-16T09:00:00Z")
+    subprocess.run(["/bin/sh", "-c", script], check=True)
 
-    record = json.loads(world.result.read_text())
+    record = json.loads(world.paths.result.read_text())
     assert record["exit_code"] == 0
     assert record["finished_at"].endswith("Z")
     # `2>` truncates, so the log stays bounded without anyone rotating it
-    assert world.log.read_text() == ""
+    assert world.paths.log.read_text() == ""
 
 
 def test_dev_checkout_is_never_overwritten(world):
     world.direct_url = EDITABLE
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
     assert world.spawns == []
 
 
@@ -270,25 +311,25 @@ def test_dev_checkout_costs_nothing_to_reject(world):
     # It never stamps, so it is due on every single launch, forever. Provenance
     # is a file read and `uv tool dir` is a subprocess: check the file first.
     world.direct_url = EDITABLE
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
     assert world.run_calls == []
 
 
 def test_env_var_opts_out(world, monkeypatch):
     monkeypatch.setenv("REWIND_NO_UPDATE", "1")
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
     assert world.spawns == []
 
 
 def test_no_update_before_the_interval_is_up(world):
     _stamp_aged(world, 60)
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
     assert world.spawns == []
 
 
 def test_no_uv_means_no_update(world):
     world.uv = None
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
     assert world.spawns == []
 
 
@@ -296,11 +337,13 @@ def test_failure_to_spawn_backs_off_for_a_day(world):
     # Offline, broken main, whatever: stamped before the spawn, so a failure
     # costs one attempt a day rather than one per launch — and never raises.
     world.popen_raises = OSError("no such file")
-    update.maybe_update_in_background()
+    update.maybe_update_in_background(world.paths)
 
     assert world.spawns == []
-    assert world.stamp.exists()
-    assert update._due() is False
+    assert world.paths.stamp.exists()
+    assert update._due(world.paths) is False
+    # Refused at the door, so there is no outcome to report -- only the attempt.
+    assert "exit_code" not in json.loads(world.paths.result.read_text())
 
 
 def test_unwritable_stamp_means_no_update(world, monkeypatch):
@@ -308,6 +351,6 @@ def test_unwritable_stamp_means_no_update(world, monkeypatch):
     def no_mkdir(*args, **kwargs):
         raise OSError("read-only")
 
-    monkeypatch.setattr(type(world.stamp), "mkdir", no_mkdir)
-    update.maybe_update_in_background()
+    monkeypatch.setattr(type(world.paths.stamp), "mkdir", no_mkdir)
+    update.maybe_update_in_background(world.paths)
     assert world.spawns == []
