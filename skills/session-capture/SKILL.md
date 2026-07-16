@@ -62,7 +62,7 @@ pbpaste
 The clipboard must be the `/copy` export, which contains lines like:
 
 ```
-**Session ID:** ses_09b5cd917ffeGvRyYdTUOYoSNN
+**Session ID:** ses_examplefixture0000000001
 **Updated:** 7/15/2026, 3:17:25 PM
 ## Assistant (Build · Kimi-k2.6 · 3.9s)
 ```
