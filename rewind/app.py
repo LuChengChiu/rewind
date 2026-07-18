@@ -1,7 +1,7 @@
 """Rewind TUI (spec §7).
 
 Reads every *.md in the vault directory, which `resolve_vault_dir` locates the
-same way the capture skill does ($SESSION_VAULT_DIR, else ~/session-vault) — so
+same way the capture skill does ($REWIND_DIR, else ~/rewind) — so
 `rewind` works from anywhere, not only from inside the vault.
 Click a card (or press Enter on it) to copy the resume command.
 """
@@ -402,7 +402,7 @@ class VaultApp(App):
             cards.mount(
                 Static(
                     f"No sessions in {self.vault_dir} — capture one with the "
-                    "session-capture skill.",
+                    "rewind-capture skill.",
                     id="empty",
                 )
             )

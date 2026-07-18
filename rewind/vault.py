@@ -25,23 +25,23 @@ COMMAND_TEMPLATES: dict[str, str] = {
 def resolve_vault_dir() -> Path:
     """Where the vault lives, resolved the same way whether reading or writing.
 
-    Mirrors the capture skill (skills/session-capture/SKILL.md): the raw value
-    of ``$SESSION_VAULT_DIR`` if set, otherwise ``~/session-vault``. Capture
-    writes there and Rewind reads there, so both must land on the same
-    directory — that symmetry is the whole reason this is one shared rule and
-    not a cwd default. An empty env var is treated as unset (bash ``:-``).
+    Mirrors the capture skill (skills/rewind-capture/SKILL.md): the raw value
+    of ``$REWIND_DIR`` if set, otherwise ``~/rewind``. Capture writes there and
+    Rewind reads there, so both must land on the same directory — that symmetry
+    is the whole reason this is one shared rule and not a cwd default. An empty
+    env var is treated as unset (bash ``:-``).
 
     The env value is used verbatim — no ``expanduser`` — because the skill's
     ``mkdir -p "$VAULT"`` does no tilde expansion either. Expanding here would
     reintroduce the exact divergence this function exists to close: a
-    single-quoted ``SESSION_VAULT_DIR='~/v'`` would have the skill write to a
+    single-quoted ``REWIND_DIR='~/v'`` would have the skill write to a
     literal ``~/v`` while Rewind read ``$HOME/v``. In normal use the shell
     expands ``~`` at assignment, so both sides already see an absolute path.
     """
-    env = os.environ.get("SESSION_VAULT_DIR")
+    env = os.environ.get("REWIND_DIR")
     if env:
         return Path(env)
-    return Path.home() / "session-vault"
+    return Path.home() / "rewind"
 
 REQUIRED_KEYS = ("harness", "session_id", "cwd", "title", "captured_at")
 

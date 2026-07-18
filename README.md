@@ -3,21 +3,21 @@
 Deliberately archive an AI coding session, then "rewind" back to it anytime.
 
 > **Naming**: the product is **Rewind** (for the "return to an earlier session"
-> verb) — the CLI command, the Python package (`rewind/`), and the distribution
-> all share that one name. "Vault" survives only for the *data store*: the
-> archive directory (`~/session-vault/`, `$SESSION_VAULT_DIR`) and the vault
-> vocabulary in the code. Session Vault was the old codename and no longer names
-> anything.
+> verb) — the CLI command, the Python package (`rewind/`), the distribution, and
+> the archive directory (`~/rewind/`, `$REWIND_DIR`) all share that one name.
+> "Vault" survives only as *vocabulary in the code* for the data store
+> (`load_vault`, `resolve_vault_dir`, …). Session Vault was the old codename and
+> no longer names anything.
 
 ## What it is
 
 A session does just two things: **capture** and **rewind**.
 
 ```
-[session-capture skill]  ──write──▶  [~/session-vault/]  ──read──▶  [rewind TUI]
+[rewind-capture skill]  ──write──▶  [~/rewind/]  ──read──▶  [rewind TUI]
 ```
 
-- **Capture**: invoke the `session-capture` skill inside a conversation. It
+- **Capture**: invoke the `rewind-capture` skill inside a conversation. It
   writes the current session as one markdown card (title / summary / the
   `harness` + `session_id` needed to get back).
 - **Rewind**: run `rewind` from anywhere, type to fuzzy-filter to the card, and
@@ -113,7 +113,7 @@ rewind
 - Focus a card and press <kbd>space</kbd> to preview its conversation;
   <kbd>esc</kbd> closes. The hint only appears on cards that can preview.
 
-The vault path comes from `$SESSION_VAULT_DIR`, defaulting to `~/session-vault/`
+The vault path comes from `$REWIND_DIR`, defaulting to `~/rewind/`
 — resolved by `resolve_vault_dir` in `rewind/vault.py`, the same rule the
 capture skill uses to *write*, so read and write always agree. `rewind` reads
 that directory regardless of where you launch it; you no longer need to `cd`
@@ -158,8 +158,8 @@ transcript (H4).
 
 ## Capture skill
 
-`skills/session-capture/SKILL.md`, symlinked to
-`~/.claude/skills/session-capture` (shared by Claude Code and opencode).
+`skills/rewind-capture/SKILL.md`, symlinked to
+`~/.claude/skills/rewind-capture` (shared by Claude Code and opencode).
 
 - **Claude Code**: bash reads `$CLAUDE_CODE_SESSION_ID` (verified present on this
   machine); older versions fall back to the `CLAUDE_SESSION_ID` value the

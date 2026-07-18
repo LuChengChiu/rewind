@@ -13,25 +13,25 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_resolve_vault_dir_defaults_to_home(monkeypatch):
-    monkeypatch.delenv("SESSION_VAULT_DIR", raising=False)
-    assert resolve_vault_dir() == Path.home() / "session-vault"
+    monkeypatch.delenv("REWIND_DIR", raising=False)
+    assert resolve_vault_dir() == Path.home() / "rewind"
 
 
 def test_resolve_vault_dir_honors_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("SESSION_VAULT_DIR", str(tmp_path))
+    monkeypatch.setenv("REWIND_DIR", str(tmp_path))
     assert resolve_vault_dir() == tmp_path
 
 
 def test_resolve_vault_dir_uses_env_verbatim(monkeypatch):
     # No expanduser: the skill's raw "$VAULT" does no tilde expansion, so an
     # unexpanded value must resolve identically on the read and write sides.
-    monkeypatch.setenv("SESSION_VAULT_DIR", "~/some/custom/path")
+    monkeypatch.setenv("REWIND_DIR", "~/some/custom/path")
     assert resolve_vault_dir() == Path("~/some/custom/path")
 
 
 def test_resolve_vault_dir_treats_empty_env_as_unset(monkeypatch):
-    monkeypatch.setenv("SESSION_VAULT_DIR", "")
-    assert resolve_vault_dir() == Path.home() / "session-vault"
+    monkeypatch.setenv("REWIND_DIR", "")
+    assert resolve_vault_dir() == Path.home() / "rewind"
 
 
 def test_load_vault_sorted_newest_first():

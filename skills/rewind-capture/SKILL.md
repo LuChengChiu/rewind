@@ -1,6 +1,7 @@
 ---
-name: session-capture
-description: Archive the current Claude Code or opencode session into the session vault — writes a markdown card with title, summary, and resume info. Use when the user says "capture this session", "封存這個 session", "存進 vault", or wants to close a session but keep a way back to it.
+name: rewind-capture
+description: Archive the current Claude Code or opencode session into the session vault — writes a markdown card with title, summary, and resume info. Invoke with /rewind-capture when closing a session you want a way back to.
+disable-model-invocation: true
 ---
 
 # Session Capture
@@ -21,7 +22,7 @@ safely close it and find it again later with the vault TUI.
 ## Step 1 — vault directory
 
 ```bash
-VAULT="${SESSION_VAULT_DIR:-$HOME/session-vault}"; mkdir -p "$VAULT"; echo "$VAULT"
+VAULT="${REWIND_DIR:-$HOME/rewind}"; mkdir -p "$VAULT"; echo "$VAULT"
 ```
 
 ## Step 2 — detect harness
