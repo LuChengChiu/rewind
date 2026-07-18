@@ -7,6 +7,9 @@ Click a card (or press Enter on it) to copy the resume command.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -71,6 +74,52 @@ def reflow(text: str) -> str:
 
 
 ROLE_LABELS = {"user": ("you", PALETTE["orange"]), "assistant": ("claude", PALETTE["stardust"])}
+
+def _clipboard_candidates() -> tuple[tuple[list[str], str], ...]:
+    """(argv, stdin encoding) clipboard writers to try, in order, for this platform."""
+    if sys.platform == "darwin":
+        return ((["pbcopy"], "utf-8"),)
+    if sys.platform == "win32":
+        # clip.exe decodes stdin in the console codepage, not UTF-8; UTF-16-LE
+        # is what it reads back losslessly, so a non-ASCII cwd survives.
+        return ((["clip"], "utf-16-le"),)
+    return (
+        (["wl-copy"], "utf-8"),
+        (["xclip", "-selection", "clipboard"], "utf-8"),
+        (["xsel", "-b", "-i"], "utf-8"),
+    )
+
+
+def _native_clipboard(text: str) -> bool:
+    """Write to the OS clipboard synchronously; return whether it succeeded.
+
+    A native binary is synchronous and last-write-wins, which is what a discrete
+    copy action should be. The caller uses the result to decide the fallback: it
+    must NOT also send OSC 52 when this succeeds. OSC 52 is applied by the
+    terminal asynchronously, so a throttled, delayed OSC 52 for an earlier click
+    could land *after* this write and clobber it — sending both races. OSC 52 is
+    therefore the fallback only when no native binary is present (e.g. over SSH).
+
+    The timeout bounds a hung writer (e.g. xclip against a dead X connection) so
+    it can't freeze the TUI; stderr is discarded so a failing binary can't
+    scribble over the screen.
+    """
+    for argv, encoding in _clipboard_candidates():
+        if shutil.which(argv[0]) is None:
+            continue
+        try:
+            subprocess.run(
+                argv,
+                input=text.encode(encoding),
+                check=True,
+                timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
 
 
 class PreviewScreen(ModalScreen[None]):
@@ -186,7 +235,12 @@ class SessionCard(Static, can_focus=True):
                 title="Not copied",
             )
             return
-        self.app.copy_to_clipboard(command)
+        # Native clipboard is authoritative: synchronous and last-write-wins.
+        # Only fall back to OSC 52 when there's no local binary (e.g. over SSH),
+        # because sending both races — a throttled OSC 52 can land late and
+        # clobber the native write.
+        if not _native_clipboard(command):
+            self.app.copy_to_clipboard(command)
         flash = self.query_one(".card-flash", Label)
         flash.update(f"Copied ✓  [dim]{escape(command)}[/dim]")
         self.add_class("copied")
