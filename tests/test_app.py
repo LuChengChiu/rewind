@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input, Label
 
-from session_vault.app import PreviewScreen, SessionCard, VaultApp, reflow
+from rewind.app import PreviewScreen, SessionCard, VaultApp, reflow
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -62,7 +62,7 @@ def clipboard(monkeypatch):
         return True
 
     app.copy_to_clipboard = osc52.append
-    monkeypatch.setattr("session_vault.app._native_clipboard", fake_native)
+    monkeypatch.setattr("rewind.app._native_clipboard", fake_native)
     return app, osc52, native
 
 
@@ -100,7 +100,7 @@ async def test_rapid_clicks_copy_last_card(clipboard):
 async def test_falls_back_to_osc52_when_no_native(clipboard, monkeypatch):
     app, osc52, native = clipboard
     # No native binary present (e.g. over SSH): the write fails.
-    monkeypatch.setattr("session_vault.app._native_clipboard", lambda text: False)
+    monkeypatch.setattr("rewind.app._native_clipboard", lambda text: False)
     async with app.run_test() as pilot:
         good = next(c for c in app.query(SessionCard) if not c.session.error)
         good.copy_command()

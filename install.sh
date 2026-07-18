@@ -39,8 +39,8 @@ uv tool install --force "$SOURCE"
 uv tool update-shell >/dev/null 2>&1 || true
 
 if command -v rewind >/dev/null 2>&1; then
-    printf '\033[32m✓ rewind installed.\033[0m Run it in your vault:  cd ~/session-vault && rewind\n'
+    printf '\033[32m✓ rewind installed.\033[0m Run it from anywhere:  rewind\n'
 else
     printf '\033[32m✓ rewind installed\033[0m to %s\n' "$(uv tool dir)"
-    say "Add it to PATH (or open a new shell), then run: cd ~/session-vault && rewind"
+    say "Add it to PATH (or open a new shell), then run: rewind"
 fi

@@ -2,10 +2,12 @@
 
 Deliberately archive an AI coding session, then "rewind" back to it anytime.
 
-> **Naming**: the product name is **Rewind** (for the "return to an earlier
-> session" verb). The internal codename was Session Vault; the CLI is now
-> `rewind`, and the package is still `session_vault/` until the code is renamed
-> to match.
+> **Naming**: the product is **Rewind** (for the "return to an earlier session"
+> verb) — the CLI command, the Python package (`rewind/`), and the distribution
+> all share that one name. "Vault" survives only for the *data store*: the
+> archive directory (`~/session-vault/`, `$SESSION_VAULT_DIR`) and the vault
+> vocabulary in the code. Session Vault was the old codename and no longer names
+> anything.
 
 ## What it is
 
@@ -18,23 +20,23 @@ A session does just two things: **capture** and **rewind**.
 - **Capture**: invoke the `session-capture` skill inside a conversation. It
   writes the current session as one markdown card (title / summary / the
   `harness` + `session_id` needed to get back).
-- **Rewind**: run `rewind` in the vault directory, type to fuzzy-filter to the
-  card, and click it to copy the resume command to the clipboard. Focus a card
-  and press <kbd>space</kbd> to preview that session's conversation.
+- **Rewind**: run `rewind` from anywhere, type to fuzzy-filter to the card, and
+  click it to copy the resume command to the clipboard. Focus a card and press
+  <kbd>space</kbd> to preview that session's conversation.
 
 ## Hard rules (from the spec — do not relitigate)
 
 | # | Rule |
 |---|------|
 | H1 | The skill never reads `~/.claude/` or opencode storage; everything written comes only from the conversation, environment variables, or the clipboard |
-| H2 | The vault stores only `harness` + `session_id`; the resume command is rendered at display time in the TUI (templates live in `COMMAND_TEMPLATES` in `session_vault/vault.py`) |
+| H2 | The vault stores only `harness` + `session_id`; the resume command is rendered at display time in the TUI (templates live in `COMMAND_TEMPLATES` in `rewind/vault.py`) |
 | H3 | The frontmatter key is `harness`, not `agent` |
 | H4 | Rather write no capture than an uncertain session id; a broken `.md` shows as a red BROKEN card in the TUI and is never silently dropped |
 
 H1 binds **the skill**, and it is about *provenance*: a card may only contain
 what the agent actually witnessed, so nothing it writes can be a guess. It is
 not a blanket ban on Rewind reading anything — the TUI's preview
-(`session_vault/transcript.py`) reads a harness's own session storage at
+(`rewind/transcript.py`) reads a harness's own session storage at
 display time, and that is fine because it writes nothing to the vault. Same
 split as H2: storage stays raw, the TUI renders. Nothing read from a harness
 may ever flow back into a `.md`.
@@ -60,7 +62,7 @@ detached background process — so the **next** launch is the updated one, the w
 The update deliberately runs *after* the TUI exits rather than at launch:
 `uv tool install --force` rebuilds the venv in place, and swapping site-packages
 under the live process would break any not-yet-executed import. It never blocks
-and never reports failure — offline just means no update (`session_vault/update.py`).
+and never reports failure — offline just means no update (`rewind/update.py`).
 
 Silent, but not invisible. A broken `main` and an up-to-date install look the
 same from the outside, so the update writes down how it went:
@@ -96,7 +98,6 @@ An attempt with no ending is the truth in that case, and it is what you get.
 ## TUI
 
 ```bash
-cd ~/session-vault
 rewind
 # dev: uv run --project ~/side-project/session-manager rewind
 ```
@@ -112,11 +113,15 @@ rewind
 - Focus a card and press <kbd>space</kbd> to preview its conversation;
   <kbd>esc</kbd> closes. The hint only appears on cards that can preview.
 
-The vault path comes from `$SESSION_VAULT_DIR`, defaulting to `~/session-vault/`.
+The vault path comes from `$SESSION_VAULT_DIR`, defaulting to `~/session-vault/`
+— resolved by `resolve_vault_dir` in `rewind/vault.py`, the same rule the
+capture skill uses to *write*, so read and write always agree. `rewind` reads
+that directory regardless of where you launch it; you no longer need to `cd`
+into the vault first.
 
 ### Preview
 
-`session_vault/transcript.py` reads the harness's own session storage at
+`rewind/transcript.py` reads the harness's own session storage at
 display time — read-only, never written back to the vault (see the H1 note
 above). For Claude Code that is
 `~/.claude/projects/<cwd-with-slashes-as-dashes>/<session_id>.jsonl`, which the

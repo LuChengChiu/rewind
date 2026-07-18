@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from session_vault.transcript import (
+from rewind.transcript import (
     TranscriptError,
     read_transcript,
     supports_preview,
@@ -127,7 +127,7 @@ def test_tool_summary_shows_key_argument(tmp_path):
          "message": {"role": "assistant", "content": [
              # path fields show the basename; command collapses to one line
              {"type": "tool_use", "name": "Write",
-              "input": {"file_path": "/a/b/session_vault/app.py", "content": "x"}},
+              "input": {"file_path": "/a/b/rewind/app.py", "content": "x"}},
              {"type": "tool_use", "name": "Bash",
               "input": {"command": "git add -A\n  && git commit"}},
              {"type": "tool_use", "name": "NotebookEdit",

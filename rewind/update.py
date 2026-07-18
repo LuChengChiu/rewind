@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-DIST = "session-vault"
+DIST = "rewind"
 REPO = "https://github.com/LuChengChiu/rewind"
 BRANCH = "main"
 SOURCE = f"git+{REPO}@{BRANCH}"

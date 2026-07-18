@@ -1,6 +1,8 @@
-"""Session Vault TUI (spec §7).
+"""Rewind TUI (spec §7).
 
-Run inside the vault directory: it reads every *.md under cwd.
+Reads every *.md in the vault directory, which `resolve_vault_dir` locates the
+same way the capture skill does ($SESSION_VAULT_DIR, else ~/session-vault) — so
+`rewind` works from anywhere, not only from inside the vault.
 Click a card (or press Enter on it) to copy the resume command.
 """
 
@@ -23,7 +25,13 @@ from textual.widgets import Input, Label, Static
 from .theme import BITCOIN_DEFI, PALETTE
 from .transcript import TranscriptError, read_transcript, supports_preview
 from .update import maybe_update_in_background
-from .vault import Session, load_vault, matches, relative_time
+from .vault import (
+    Session,
+    load_vault,
+    matches,
+    relative_time,
+    resolve_vault_dir,
+)
 
 # harness -> (badge label, reverse-video chip color). Colors come from the
 # palette so the theme stays the single source of truth.
@@ -252,7 +260,7 @@ class SessionCard(Static, can_focus=True):
 
 
 class VaultApp(App):
-    TITLE = "Session Vault"
+    TITLE = "Rewind"
 
     # priority=True so these fire even while the filter Input has focus, and so
     # ctrl+c reaches us instead of Textual's built-in handling.
@@ -378,7 +386,7 @@ class VaultApp(App):
 
     def __init__(self, vault_dir: Path | None = None) -> None:
         super().__init__()
-        self.vault_dir = vault_dir or Path.cwd()
+        self.vault_dir = vault_dir or resolve_vault_dir()
         self.sessions: list[Session] = []
 
     def compose(self) -> ComposeResult:
@@ -429,7 +437,7 @@ class VaultApp(App):
 
 def main() -> None:
     VaultApp().run()
-    # After the TUI is down, never before it — see session_vault/update.py.
+    # After the TUI is down, never before it — see rewind/update.py.
     maybe_update_in_background()
 
 

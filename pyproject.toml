@@ -1,7 +1,7 @@
 [project]
-name = "session-vault"
+name = "rewind"
 version = "0.1.0"
-description = "TUI for browsing a session vault of deliberately archived Claude Code / opencode sessions"
+description = "Rewind: a TUI for browsing a vault of deliberately archived Claude Code / opencode sessions"
 requires-python = ">=3.12"
 dependencies = [
     "textual>=1.0",
@@ -9,14 +9,14 @@ dependencies = [
 ]
 
 [project.scripts]
-rewind = "session_vault.app:main"
+rewind = "rewind.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["session_vault"]
+packages = ["rewind"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

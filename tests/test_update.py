@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from session_vault import update
+from rewind import update
 
 REPO_URL = "https://github.com/LuChengChiu/rewind"
 
@@ -57,7 +57,7 @@ def world(tmp_path, monkeypatch):
     install (un)touchable stays legible.
     """
     tools = tmp_path / "tools"
-    prefix = tools / "session-vault"
+    prefix = tools / "rewind"
     prefix.mkdir(parents=True)
 
     state = types.SimpleNamespace(
