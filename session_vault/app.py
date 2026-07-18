@@ -104,6 +104,9 @@ class PreviewScreen(ModalScreen[None]):
             )
         except TranscriptError as exc:
             # H4: say exactly what failed rather than show an empty dialog.
+            # An error is a few lines and never scrolls, so the dialog drops its
+            # transcript-sized viewport and shrinks to the message.
+            self.query_one("#preview").add_class("compact")
             body.mount(Label(f"🚨 {escape(str(exc))}", classes="preview-error"))
             return
         for message in messages:
@@ -282,6 +285,15 @@ class VaultApp(App):
         background: $surface;
         border: round $accent;
         padding: 0 1;
+    }
+    /* A failed preview is a few lines that never scroll, so the dialog drops
+       the transcript-sized viewport. Only this path may size to content: with
+       a real transcript the `1fr` body below has nothing to divide up. */
+    #preview.compact {
+        height: auto;
+    }
+    #preview.compact #preview-body {
+        height: auto;
     }
     #preview-title {
         width: 100%;

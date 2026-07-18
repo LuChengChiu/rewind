@@ -84,7 +84,7 @@ _TOOL_SUMMARY_KEYS: dict[str, tuple[str, ...]] = {
     "Read": ("file_path",),
     "Edit": ("file_path",),
     "Write": ("file_path",),
-    "NotebookEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
     "Glob": ("pattern",),
     "Grep": ("pattern",),
     "Agent": ("description",),
@@ -93,7 +93,7 @@ _TOOL_SUMMARY_KEYS: dict[str, tuple[str, ...]] = {
     "WebFetch": ("url",),
     "WebSearch": ("query",),
 }
-_PATH_KEYS = {"file_path", "path"}
+_PATH_KEYS = {"file_path", "notebook_path"}
 _SUMMARY_WIDTH = 60  # max chars inside the parens; longer values end in "…"
 
 

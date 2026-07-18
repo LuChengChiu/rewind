@@ -130,13 +130,17 @@ def test_tool_summary_shows_key_argument(tmp_path):
               "input": {"file_path": "/a/b/session_vault/app.py", "content": "x"}},
              {"type": "tool_use", "name": "Bash",
               "input": {"command": "git add -A\n  && git commit"}},
+             {"type": "tool_use", "name": "NotebookEdit",
+              "input": {"notebook_path": "/a/b/notebooks/eda.ipynb",
+                        "new_source": "x"}},
              {"type": "tool_use", "name": "AskUserQuestion",
               "input": {"questions": []}},  # no summary key -> bare name
          ]}},
     ])
     messages = read_transcript("claude-code", SESSION_ID, CWD)
     assert messages[1].text == (
-        "⏺ Write(app.py)\n\n⏺ Bash(git add -A && git commit)\n\n⏺ AskUserQuestion"
+        "⏺ Write(app.py)\n\n⏺ Bash(git add -A && git commit)"
+        "\n\n⏺ NotebookEdit(eda.ipynb)\n\n⏺ AskUserQuestion"
     )
 
 
