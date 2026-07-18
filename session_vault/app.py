@@ -13,10 +13,12 @@ from pathlib import Path
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Static
 
 from .theme import BITCOIN_DEFI, PALETTE
+from .transcript import TranscriptError, read_transcript, supports_preview
 from .update import maybe_update_in_background
 from .vault import Session, load_vault, matches, relative_time
 
@@ -68,6 +70,52 @@ def reflow(text: str) -> str:
     return "\n\n".join(joined)
 
 
+ROLE_LABELS = {"user": ("you", PALETTE["orange"]), "assistant": ("claude", PALETTE["stardust"])}
+
+
+class PreviewScreen(ModalScreen[None]):
+    """Read-only transcript of one session, read from its harness's storage.
+
+    Display only: nothing here is written back to the vault (see transcript.py).
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
+
+    def __init__(self, session: Session) -> None:
+        super().__init__()
+        self.session = session
+
+    def compose(self) -> ComposeResult:
+        s = self.session
+        with Vertical(id="preview"):
+            yield Label(f"[b]{escape(s.title)}[/b]", id="preview-title")
+            yield Label(
+                f"[dim]{escape(relative_time(s.captured_at))}  ·  {escape(s.cwd)}[/dim]",
+                id="preview-meta",
+            )
+            yield VerticalScroll(id="preview-body")
+            yield Label("[dim]esc close  ·  ↑↓ scroll[/dim]", id="preview-hint")
+
+    def on_mount(self) -> None:
+        body = self.query_one("#preview-body", VerticalScroll)
+        try:
+            messages = read_transcript(
+                self.session.harness, self.session.session_id, self.session.cwd
+            )
+        except TranscriptError as exc:
+            # H4: say exactly what failed rather than show an empty dialog.
+            body.mount(Label(f"🚨 {escape(str(exc))}", classes="preview-error"))
+            return
+        for message in messages:
+            label, color = ROLE_LABELS.get(message.role, (message.role, PALETTE["stardust"]))
+            body.mount(Label(f"[b {color}]▌ {escape(label)}[/b {color}]", classes="preview-role"))
+            body.mount(Label(escape(message.text), classes="preview-text"))
+        body.focus()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 class SessionCard(Static, can_focus=True):
     def __init__(self, session: Session) -> None:
         super().__init__()
@@ -106,6 +154,10 @@ class SessionCard(Static, can_focus=True):
             yield Label(
                 " ".join(f"#{escape(t)}" for t in s.tags), classes="card-tags"
             )
+        # Only harnesses with a reader can preview; the rest simply never offer
+        # it. CSS reveals the hint on focus so idle cards stay uncluttered.
+        if supports_preview(s.harness):
+            yield Label("space preview", classes="card-hint")
         yield Label("", classes="card-flash")
 
     def on_click(self) -> None:
@@ -113,6 +165,13 @@ class SessionCard(Static, can_focus=True):
 
     def key_enter(self) -> None:
         self.copy_command()
+
+    def key_space(self) -> None:
+        # Only fires while the card itself has focus, so it never competes with
+        # a space typed into the filter Input.
+        if self.session.error or not supports_preview(self.session.harness):
+            return
+        self.app.push_screen(PreviewScreen(self.session))
 
     def copy_command(self) -> None:
         command = self.session.resume_command
@@ -201,9 +260,53 @@ class VaultApp(App):
         color: $success;
         text-style: bold;
     }
+    .card-hint {
+        display: none;
+        color: $text-muted;
+        margin-top: 1;
+    }
+    SessionCard:focus .card-hint {
+        display: block;
+    }
     #empty {
         padding: 1 2;
         color: $text-muted;
+    }
+    PreviewScreen {
+        align: center middle;
+    }
+    #preview {
+        width: 90%;
+        max-width: 100;
+        height: 85%;
+        background: $surface;
+        border: round $accent;
+        padding: 0 1;
+    }
+    #preview-title {
+        width: 100%;
+    }
+    #preview-meta {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #preview-body {
+        height: 1fr;
+    }
+    #preview-hint {
+        margin-top: 1;
+    }
+    .preview-role {
+        margin-top: 1;
+    }
+    .preview-text {
+        /* Same reason as .card-summary: Label shrink-wraps without a width. */
+        width: 100%;
+        color: $text-muted;
+    }
+    .preview-error {
+        width: 100%;
+        color: $error;
     }
     """
 

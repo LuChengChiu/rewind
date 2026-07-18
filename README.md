@@ -19,7 +19,8 @@ A session does just two things: **capture** and **rewind**.
   writes the current session as one markdown card (title / summary / the
   `harness` + `session_id` needed to get back).
 - **Rewind**: run `rewind` in the vault directory, type to fuzzy-filter to the
-  card, and click it to copy the resume command to the clipboard.
+  card, and click it to copy the resume command to the clipboard. Focus a card
+  and press <kbd>space</kbd> to preview that session's conversation.
 
 ## Hard rules (from the spec — do not relitigate)
 
@@ -29,6 +30,14 @@ A session does just two things: **capture** and **rewind**.
 | H2 | The vault stores only `harness` + `session_id`; the resume command is rendered at display time in the TUI (templates live in `COMMAND_TEMPLATES` in `session_vault/vault.py`) |
 | H3 | The frontmatter key is `harness`, not `agent` |
 | H4 | Rather write no capture than an uncertain session id; a broken `.md` shows as a red BROKEN card in the TUI and is never silently dropped |
+
+H1 binds **the skill**, and it is about *provenance*: a card may only contain
+what the agent actually witnessed, so nothing it writes can be a guess. It is
+not a blanket ban on Rewind reading anything — the TUI's preview
+(`session_vault/transcript.py`) reads a harness's own session storage at
+display time, and that is fine because it writes nothing to the vault. Same
+split as H2: storage stays raw, the TUI renders. Nothing read from a harness
+may ever flow back into a `.md`.
 
 ## Install
 
@@ -100,8 +109,47 @@ rewind
 - Cards are sorted by `captured_at`, newest first.
 - Cards that are broken, missing fields, or have an unknown harness are shown in
   red with the reason (H4).
+- Focus a card and press <kbd>space</kbd> to preview its conversation;
+  <kbd>esc</kbd> closes. The hint only appears on cards that can preview.
 
 The vault path comes from `$SESSION_VAULT_DIR`, defaulting to `~/session-vault/`.
+
+### Preview
+
+`session_vault/transcript.py` reads the harness's own session storage at
+display time — read-only, never written back to the vault (see the H1 note
+above). For Claude Code that is
+`~/.claude/projects/<cwd-with-slashes-as-dashes>/<session_id>.jsonl`, which the
+card's `cwd` + `session_id` already locate exactly.
+
+Reconstructing the conversation is a graph walk, not a file read: the file is a
+DAG whose `parentUuid` chain threads through non-message records, and it
+retains branches abandoned by rewinds. The reader maps *every* record by uuid,
+takes the newest message as the leaf, walks `parentUuid` back to the root, and
+only then filters to messages — mapping just the messages dead-ends the walk at
+the first `attachment` and yields a truncated transcript that looks complete
+(`tests/test_transcript.py::test_chain_walks_through_non_message_records`).
+
+**Adding a harness** is one reader plus one entry in `TRANSCRIPT_READERS`, the
+same shape as `COMMAND_TEMPLATES` in `vault.py`:
+
+```python
+def _read_opencode(session_id: str, cwd: str) -> list[Message]: ...
+
+TRANSCRIPT_READERS = {
+    "claude-code": _read_claude_code,
+    "opencode": _read_opencode,
+}
+```
+
+A harness with no reader has no preview: the card offers no hint and space does
+nothing. That is a supported state, not an error — only `claude-code` has a
+reader today, so opencode cards simply do not preview.
+
+Because this reads a format Anthropic does not promise to keep stable, it is
+display-only by design: if the format shifts, the dialog shows a loud error and
+nothing else in Rewind is affected. Failures never fall back to a partial
+transcript (H4).
 
 ## Capture skill
 
