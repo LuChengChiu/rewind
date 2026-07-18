@@ -109,13 +109,86 @@ def test_tool_use_blocks_render_as_tool_lines(tmp_path):
             "message": {"role": "assistant", "content": [
                 {"type": "thinking", "thinking": "hidden from preview"},
                 {"type": "text", "text": "on it"},
-                {"type": "tool_use", "name": "Bash", "input": {}},
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "git status"}},
             ]},
         },
     ])
     messages = read_transcript("claude-code", SESSION_ID, CWD)
-    assert messages[1].text == "on it\n\n⏺ Bash"
+    assert messages[1].text == "on it\n\n⏺ Bash(git status)"
     assert "hidden from preview" not in messages[1].text
+
+
+def test_tool_summary_shows_key_argument(tmp_path):
+    _write(tmp_path, [
+        _msg("a", None, "user", "go", 0),
+        {"uuid": "b", "parentUuid": "a", "type": "assistant",
+         "timestamp": "2026-07-16T10:01:00.000Z",
+         "message": {"role": "assistant", "content": [
+             # path fields show the basename; command collapses to one line
+             {"type": "tool_use", "name": "Write",
+              "input": {"file_path": "/a/b/session_vault/app.py", "content": "x"}},
+             {"type": "tool_use", "name": "Bash",
+              "input": {"command": "git add -A\n  && git commit"}},
+             {"type": "tool_use", "name": "AskUserQuestion",
+              "input": {"questions": []}},  # no summary key -> bare name
+         ]}},
+    ])
+    messages = read_transcript("claude-code", SESSION_ID, CWD)
+    assert messages[1].text == (
+        "⏺ Write(app.py)\n\n⏺ Bash(git add -A && git commit)\n\n⏺ AskUserQuestion"
+    )
+
+
+def test_tool_summary_truncates_only_past_60_chars(tmp_path):
+    _write(tmp_path, [
+        _msg("a", None, "user", "go", 0),
+        {"uuid": "b", "parentUuid": "a", "type": "assistant",
+         "timestamp": "2026-07-16T10:01:00.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "name": "Bash",
+              "input": {"command": "x" * 60}},  # at the limit: shown whole
+             {"type": "tool_use", "name": "Bash",
+              "input": {"command": "y" * 61}},  # one past: 59 chars + ellipsis
+         ]}},
+    ])
+    messages = read_transcript("claude-code", SESSION_ID, CWD)
+    assert messages[1].text == (
+        "⏺ Bash(" + "x" * 60 + ")\n\n⏺ Bash(" + "y" * 59 + "…)"
+    )
+
+
+def test_empty_summary_falls_back_to_bare_name(tmp_path):
+    _write(tmp_path, [
+        _msg("a", None, "user", "go", 0),
+        {"uuid": "b", "parentUuid": "a", "type": "assistant",
+         "timestamp": "2026-07-16T10:01:00.000Z",
+         "message": {"role": "assistant", "content": [
+             # a value that summarizes to "" must not render as "⏺ Name()"
+             {"type": "tool_use", "name": "Bash",
+              "input": {"command": "  \n  "}},  # whitespace-only
+             {"type": "tool_use", "name": "Read",
+              "input": {"file_path": "/a/b/"}},  # path ending in "/"
+         ]}},
+    ])
+    messages = read_transcript("claude-code", SESSION_ID, CWD)
+    assert messages[1].text == "⏺ Bash\n\n⏺ Read"
+
+
+def test_malformed_tool_input_falls_back_to_bare_name(tmp_path):
+    _write(tmp_path, [
+        _msg("a", None, "user", "go", 0),
+        {"uuid": "b", "parentUuid": "a", "type": "assistant",
+         "timestamp": "2026-07-16T10:01:00.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "name": "Bash", "input": "not a dict"},
+             {"type": "tool_use", "name": "Read"},  # input missing entirely
+             {"type": "tool_use", "name": "Edit",
+              "input": {"file_path": 42}},  # summary key holds a non-string
+         ]}},
+    ])
+    messages = read_transcript("claude-code", SESSION_ID, CWD)
+    assert messages[1].text == "⏺ Bash\n\n⏺ Read\n\n⏺ Edit"
 
 
 def test_cycle_does_not_hang(tmp_path):

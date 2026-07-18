@@ -104,7 +104,7 @@ class PreviewScreen(ModalScreen[None]):
             )
         except TranscriptError as exc:
             # H4: say exactly what failed rather than show an empty dialog.
-            body.mount(Label(f"⚠ {escape(str(exc))}", classes="preview-error"))
+            body.mount(Label(f"🚨 {escape(str(exc))}", classes="preview-error"))
             return
         for message in messages:
             label, color = ROLE_LABELS.get(message.role, (message.role, PALETTE["stardust"]))

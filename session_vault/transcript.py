@@ -76,11 +76,55 @@ def _claude_code_transcript_path(session_id: str, cwd: str) -> Path:
     return Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl"
 
 
+# Per-tool: which input field best summarizes the call on one line. First key
+# that is present wins; a tool absent here shows its name alone. Path-valued
+# fields are basename'd by _tool_summary so the line stays short.
+_TOOL_SUMMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "Bash": ("command",),
+    "Read": ("file_path",),
+    "Edit": ("file_path",),
+    "Write": ("file_path",),
+    "NotebookEdit": ("file_path",),
+    "Glob": ("pattern",),
+    "Grep": ("pattern",),
+    "Agent": ("description",),
+    "Task": ("description",),
+    "Skill": ("skill",),
+    "WebFetch": ("url",),
+    "WebSearch": ("query",),
+}
+_PATH_KEYS = {"file_path", "path"}
+_SUMMARY_WIDTH = 60  # max chars inside the parens; longer values end in "…"
+
+
+def _tool_summary(name: str, tool_input: object) -> str:
+    # A malformed block degrades to the bare name rather than erroring: this is
+    # one line's label, not the transcript, so H4's loud-failure rule (which
+    # guards against a *partial transcript* posing as complete) does not apply.
+    if not isinstance(tool_input, dict):
+        return f"⏺ {name}"
+    for key in _TOOL_SUMMARY_KEYS.get(name, ()):
+        value = tool_input.get(key)
+        if not isinstance(value, str):
+            continue
+        summary = value.split("/")[-1] if key in _PATH_KEYS else value
+        summary = " ".join(summary.split())  # collapse newlines/indent to one line
+        if not summary:  # whitespace-only, or a path ending in "/"
+            continue
+        if len(summary) > _SUMMARY_WIDTH:
+            summary = summary[: _SUMMARY_WIDTH - 1] + "…"
+        return f"⏺ {name}({summary})"
+    return f"⏺ {name}"
+
+
 def _extract_text(message: dict) -> str:
     """Flatten a message's content to display text.
 
     `thinking` and `tool_result` blocks are dropped: this is a "which session
     was this?" preview, and both bury the conversation they are meant to locate.
+    A `tool_use` becomes a one-line `⏺ Name(summary)` — the summary is the input
+    field that most identifies the call, so the preview reads like the session
+    did instead of a column of bare `⏺ Bash`.
     """
     content = message.get("content")
     if isinstance(content, str):
@@ -94,7 +138,7 @@ def _extract_text(message: dict) -> str:
         if block.get("type") == "text":
             parts.append(_clean(str(block.get("text", ""))))
         elif block.get("type") == "tool_use":
-            parts.append(f"⏺ {block.get('name', 'tool')}")
+            parts.append(_tool_summary(str(block.get("name", "tool")), block.get("input")))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -126,8 +170,8 @@ def _read_claude_code(session_id: str, cwd: str) -> list[Message]:
     if not path.is_file():
         raise TranscriptError(
             f"No transcript file at {path}\n\n"
-            "The session may have been deleted, or captured under a different "
-            "working directory than it started in."
+            "The session may have been deleted/expired, or captured under a "
+            "different working directory than it started in."
         )
 
     records: dict[str, dict] = {}
