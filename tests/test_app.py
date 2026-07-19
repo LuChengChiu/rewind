@@ -377,6 +377,22 @@ async def test_hint_row_advertises_only_what_the_card_can_do():
 
 
 @pytest.mark.asyncio
+async def test_hint_row_is_not_clipped_at_the_narrowest_layout():
+    # A one-column terminal is the tight case: uniform grid rows used to clip
+    # the tallest card, and the hint row is last, so delete was what vanished.
+    app = VaultApp(vault_dir=FIXTURES)
+    async with app.run_test(size=(50, 40)) as pilot:
+        card = _claude_card(app)
+        card.focus()
+        await pilot.pause()
+        rendered = "\n".join(
+            "".join(seg.text for seg in strip)
+            for strip in app.screen._compositor.render_strips()
+        )
+        assert "delete d" in rendered
+
+
+@pytest.mark.asyncio
 async def test_d_moves_the_session_to_trash(live_vault):
     app = VaultApp(vault_dir=live_vault)
     async with app.run_test() as pilot:

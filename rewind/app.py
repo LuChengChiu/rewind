@@ -202,13 +202,24 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         # which is also the only thing its own card shows.
         name = self.session.title or self.session.path.name
         with Vertical(id="confirm"):
-            yield Label(f"Delete [b]{escape(name)}[/b]?", id="confirm-title")
+            # The verb gets its own line in the error color rather than sharing
+            # one with the title: titles are long and arbitrary, so inline they
+            # wrap and push "Delete" away from the edge where it reads as the
+            # question. Separated, the destructive word lands first every time.
+            yield Label("Delete this session?", id="confirm-title")
+            yield Label(f"[b]{escape(name)}[/b]", id="confirm-name")
+            # When there is no title the heading is already the filename, so
+            # naming it again below would print it twice in four lines.
+            fate = (
+                f"{escape(self.session.path.name)} moves"
+                if self.session.title
+                else "Moves"
+            )
             yield Label(
-                f"[dim]{escape(self.session.path.name)} moves to .trash/ — "
-                "the file is kept, not erased.[/dim]",
+                f"[dim]{fate} to .trash/ — the file is kept, not erased.[/dim]",
                 id="confirm-body",
             )
-            yield Label("delete [dim]y[/dim]   cancel [dim]esc / n[/dim]", id="confirm-hint")
+            yield Label("delete [dim]y[/dim]   cancel [dim]esc/n[/dim]", id="confirm-hint")
 
     def action_confirm(self) -> None:
         self.dismiss(True)
@@ -272,12 +283,17 @@ class SessionCard(Static, can_focus=True):
         s = self.session
         parts = []
         if not s.error:
-            parts.append("copy [dim]enter[/dim]")
+            # Click is listed because it is how most readers find copy at all;
+            # the whole card is the target (see on_click), not just this row.
+            parts.append("copy [dim]enter/click[/dim]")
             # Only harnesses with a reader can preview; the rest never offer it.
             if supports_preview(s.harness):
                 parts.append("preview [dim]space[/dim]")
         parts.append("delete [dim]d[/dim]")
-        return "   ".join(parts)
+        # Two spaces, not three: at CARD_WIDTH the full three-action row is a
+        # couple of columns too wide, and the segment that falls off the end is
+        # delete — the one action with no other affordance anywhere in the UI.
+        return "  ".join(parts)
 
     def on_click(self) -> None:
         self.copy_command()
@@ -358,6 +374,10 @@ class VaultApp(App):
            grid has no auto-fill, so it can't reflow from CSS alone. */
         layout: grid;
         grid-gutter: 1;
+        /* Without this, rows take a uniform default height and any card taller
+           than it is clipped — losing the tags and the hint row, which is where
+           delete is advertised. Cards are height:auto, so the rows must be too. */
+        grid-rows: auto;
     }
     SessionCard {
         background: $surface;
@@ -409,6 +429,9 @@ class VaultApp(App):
            action names stay the brighter half of the pair. */
         color: $text;
         margin-top: 1;
+        /* Same reason as .card-summary: without a width Label shrink-wraps and
+           overflows, which clips the row's tail rather than wrapping it. */
+        width: 100%;
     }
     SessionCard:focus .card-hint {
         display: block;
@@ -431,8 +454,16 @@ class VaultApp(App):
         border: round $error;
         padding: 1 2;
     }
-    #confirm-title, #confirm-body {
+    #confirm-title {
         width: 100%;
+        color: $error;
+        text-style: bold;
+    }
+    #confirm-name, #confirm-body {
+        width: 100%;
+    }
+    #confirm-name {
+        margin-bottom: 1;
     }
     #confirm-hint {
         width: 100%;
