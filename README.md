@@ -52,7 +52,11 @@ Type to filter, click the card you want, and its resume command
 | click / <kbd>enter</kbd> | Copy that session's resume command; the card flashes `Copied ✓` |
 | <kbd>space</kbd> | Preview the session's actual conversation (focused card only) |
 | <kbd>esc</kbd> | Close the preview |
+| <kbd>ctrl+r</kbd> | Re-read the vault, keeping whatever you've typed in the filter |
 | <kbd>ctrl+c</kbd> / <kbd>ctrl+q</kbd> | Quit — press twice within 2s |
+
+The vault is read at startup and on <kbd>ctrl+r</kbd> — nothing watches the
+directory, so a session captured while Rewind is open needs a reload to appear.
 
 Cards are sorted newest-first and laid out in up to three columns depending on
 terminal width. A card that's malformed, missing fields, or from an unknown

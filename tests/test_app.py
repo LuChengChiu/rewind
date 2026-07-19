@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Label
+from textual.widgets import Input, Label, Static
 
 from rewind.app import PreviewScreen, SessionCard, VaultApp, reflow
 
@@ -43,6 +43,152 @@ async def test_cards_render_and_filter():
         # the broken card stays visible (H4), plus the matching one
         assert {c.session.error is None for c in visible} == {True, False}
         assert sum(1 for c in visible if not c.session.error) == 1
+
+
+@pytest.fixture
+def live_vault(tmp_path):
+    """A vault dir seeded from the fixtures that a test can write into."""
+    for src in FIXTURES.glob("*.md"):
+        (tmp_path / src.name).write_text(src.read_text())
+    return tmp_path
+
+
+def _capture(vault: Path, name: str, title: str) -> None:
+    (vault / name).write_text(
+        "---\n"
+        "harness: claude-code\n"
+        "session_id: 11111111-2222-3333-4444-555555555555\n"
+        "cwd: /Users/x/proj\n"
+        f"title: {title}\n"
+        "captured_at: 2026-07-19T12:00:00+08:00\n"
+        "---\n\n"
+        "captured after the TUI was already running\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_r_picks_up_a_session_captured_while_running(live_vault):
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        assert len(app.query(SessionCard)) == 3
+
+        _capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        titles = [c.session.title for c in app.query(SessionCard)]
+        assert "late arrival" in titles
+        assert len(titles) == 4
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_the_active_filter(live_vault):
+    # Rebuilding the grid remounts every card with display defaulting to True,
+    # so the filter has to be re-applied or a reload silently clears it.
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        app.query_one("#filter", Input).value = "logger"
+        await pilot.pause()
+
+        _capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        visible = [c for c in app.query(SessionCard) if c.display and not c.session.error]
+        assert [c.session.title for c in visible] == ["Logger facade PRD discussion"]
+
+
+@pytest.mark.asyncio
+async def test_empty_vault_says_how_to_reload(tmp_path):
+    # The empty state sends the reader off to capture a session, so it is the
+    # one screen that must also say how to come back.
+    app = VaultApp(vault_dir=tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "ctrl+r" in str(app.query_one("#empty", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_reload_from_empty_vault_replaces_the_empty_state(tmp_path):
+    app = VaultApp(vault_dir=tmp_path)
+    async with app.run_test() as pilot:
+        assert len(app.query(SessionCard)) == 0
+
+        _capture(tmp_path, "2026-07-19-first.md", "first one")
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert len(app.query(SessionCard)) == 1
+        assert len(app.query("#empty")) == 0
+
+
+@pytest.mark.asyncio
+async def test_reload_drops_a_session_deleted_from_the_vault(live_vault):
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        gone = next(c for c in app.query(SessionCard) if not c.session.error).session
+        gone.path.unlink()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert gone.title not in [c.session.title for c in app.query(SessionCard)]
+
+
+@pytest.mark.asyncio
+async def test_reload_of_an_emptied_vault_restores_the_empty_state(live_vault):
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        for path in live_vault.glob("*.md"):
+            path.unlink()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert len(app.query(SessionCard)) == 0
+        assert len(app.query("#empty")) == 1
+
+
+@pytest.mark.asyncio
+async def test_reload_returns_focus_to_the_filter(live_vault):
+    # Rebuilding removes the focused card, and Textual parks focus on the
+    # scroll container — which is focusable but swallows typing, so the filter
+    # looks dead until clicked.
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        # Also covers launch, which goes through the same reload path.
+        assert app.focused is app.query_one("#filter", Input)
+
+        next(c for c in app.query(SessionCard) if not c.session.error).focus()
+        await pilot.pause()
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert app.focused is app.query_one("#filter", Input)
+
+
+@pytest.mark.asyncio
+async def test_reload_under_a_preview_survives_dismissing_it(live_vault):
+    # ctrl+r is app-level, so it fires with the modal up. The rebuild must not
+    # disturb the modal's own focus, and — because the reload destroyed the card
+    # that was focused behind it — dismissing has to land on the filter rather
+    # than the dead scroll container.
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        card = next(c for c in app.query(SessionCard) if not c.session.error)
+        card.focus()
+        await pilot.pause()
+        app.push_screen(PreviewScreen(card.session))
+        await pilot.pause()
+        modal_focus = app.focused
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert isinstance(app.screen, PreviewScreen)
+        assert app.focused is modal_focus
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.focused is app.query_one("#filter", Input)
 
 
 @pytest.fixture

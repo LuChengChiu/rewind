@@ -3,7 +3,8 @@
 Reads every *.md in the vault directory, which `resolve_vault_dir` locates the
 same way the capture skill does ($REWIND_DIR, else ~/rewind) — so
 `rewind` works from anywhere, not only from inside the vault.
-Click a card (or press Enter on it) to copy the resume command.
+Click a card (or press Enter on it) to copy the resume command; ctrl+r re-reads
+the vault (see `VaultApp._reload`).
 """
 
 from __future__ import annotations
@@ -265,9 +266,15 @@ class VaultApp(App):
 
     # priority=True so these fire even while the filter Input has focus, and so
     # ctrl+c reaches us instead of Textual's built-in handling.
+    # ctrl+r rather than a bare `r` for the same reason space previews only from
+    # a focused card: plain letters belong to the filter Input, which holds
+    # focus from launch. It is app-level (not card-level) so it still works on
+    # an empty vault, where there is no card to focus and reloading is the whole
+    # point.
     BINDINGS = [
         Binding("ctrl+c", "quit_with_toast", "Quit", priority=True),
         Binding("ctrl+q", "quit_with_toast", "Quit", priority=True),
+        Binding("ctrl+r", "reload", "Reload", priority=True),
     ]
 
     CSS = """
@@ -403,30 +410,63 @@ class VaultApp(App):
         yield Input(placeholder="type to filter…", id="filter")
         yield VerticalScroll(id="cards")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.register_theme(BITCOIN_DEFI)
         self.theme = "bitcoin-defi"
+        await self._reload()
+
+    async def _reload(self) -> None:
+        """Re-read the vault and rebuild the grid from scratch.
+
+        The vault is only ever read here, so a session captured while the TUI
+        is up appears on the next reload — nothing watches the directory.
+        Removal and mounting are awaited so the cards exist before the filter
+        is re-applied below; skipping that would leave a stale query showing
+        every freshly mounted card.
+        """
         self.sessions = load_vault(self.vault_dir)
         cards = self.query_one("#cards", VerticalScroll)
-        if not self.sessions:
-            cards.mount(
+        await cards.remove_children()
+        if self.sessions:
+            await cards.mount_all(SessionCard(s) for s in self.sessions)
+            self._apply_filter(self.query_one("#filter", Input).value)
+        else:
+            # This is the one screen where reloading is the likely next action:
+            # the message sends the reader off to capture a session, so it also
+            # has to say how to come back.
+            await cards.mount(
                 Static(
                     f"No sessions in {self.vault_dir} — capture one with the "
-                    "rewind-capture skill.",
+                    "rewind-capture skill, then press ctrl+r to reload.",
                     id="empty",
                 )
             )
-            return
-        for session in self.sessions:
-            cards.mount(SessionCard(session))
+        # Rebuilding destroys whatever card had focus, and Textual parks focus
+        # on the scroll container — which swallows keys without being an input,
+        # so the filter would look dead until clicked. Unconditional on purpose:
+        # under an open preview this sets focus on the background screen without
+        # touching the modal's own, which is what makes dismissing the preview
+        # land on the filter instead of that same dead container.
         self.query_one("#filter", Input).focus()
+
+    async def action_reload(self) -> None:
+        await self._reload()
+        # A silent reload over an unchanged vault is indistinguishable from a
+        # dead keybinding, so it always reports the count.
+        count = len(self.sessions)
+        self.notify(
+            f"Reloaded — {count} session{'s' if count != 1 else ''}",
+            title="Rewind",
+        )
 
     def on_resize(self, event: events.Resize) -> None:
         columns = min(self.MAX_COLUMNS, max(1, event.size.width // self.CARD_WIDTH))
         self.query_one("#cards", VerticalScroll).styles.grid_size_columns = columns
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        query = event.value
+        self._apply_filter(event.value)
+
+    def _apply_filter(self, query: str) -> None:
         for card in self.query(SessionCard):
             card.display = card.session.error is not None or matches(
                 query, card.session
