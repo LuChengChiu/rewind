@@ -95,8 +95,20 @@ date -Iseconds                                 # → captured_at field
 Write `title` and `summary` yourself from the conversation:
 
 - **title**: one line, specific enough to recognize three weeks later.
-- **summary**: 2–5 sentences of prose in the body — what was discussed, where
-  it is stuck / what it is waiting on, and the concrete next step.
+- **summary**: 2–4 sentences of prose in the body. This is a "find my way
+  back" note, not a changelog: the reader is the user three weeks later, and
+  the card must answer what this session was, what is still open, and the
+  concrete next step. Anything already recoverable from the repo (commits,
+  diffs, test results, decisions that got superseded) is dead weight — keep
+  only what can't be reconstructed: open problems, subtle traps discovered,
+  what the work is blocked on, and the next action.
+
+  Bad (changelog): "Started as a review of X. Findings led to dropping Y
+  (62 tests pass). Then the user overruled Z, so …"
+  Good (way back): "Renamed package to `rewind`. Still open: old uv tool
+  installs have no migration path — uninstalling the old name deletes the
+  new executable via its receipt. Next: decide the migration step in
+  install.sh."
 
 Filename: `<vault>/YYYY-MM-DD-<slug>.md` where the slug is a short kebab-case
 version of the title (ASCII). If the file already exists, append `-2`, `-3`, …
