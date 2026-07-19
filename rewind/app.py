@@ -16,6 +16,7 @@ import unicodedata
 from pathlib import Path
 
 from rich.markup import escape
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -280,12 +281,16 @@ class VaultApp(App):
     #cards {
         padding: 0 1;
         align-horizontal: left;
+        /* Column count is set from the terminal width in on_resize; Textual's
+           grid has no auto-fill, so it can't reflow from CSS alone. */
+        layout: grid;
+        grid-gutter: 1;
     }
     SessionCard {
         background: $surface;
         border: round $surface-lighten-2;
-        width: 90%;
-        max-width: 80;
+        width: 100%;
+        max-width: 200;
         padding: 0 1;
         margin-bottom: 1;
         height: auto;
@@ -384,6 +389,11 @@ class VaultApp(App):
     }
     """
 
+    # Card content reads comfortably around this width; the grid fits as many
+    # whole cards as the terminal allows, capped so cards never get too narrow.
+    CARD_WIDTH = 46
+    MAX_COLUMNS = 3
+
     def __init__(self, vault_dir: Path | None = None) -> None:
         super().__init__()
         self.vault_dir = vault_dir or resolve_vault_dir()
@@ -410,6 +420,10 @@ class VaultApp(App):
         for session in self.sessions:
             cards.mount(SessionCard(session))
         self.query_one("#filter", Input).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        columns = min(self.MAX_COLUMNS, max(1, event.size.width // self.CARD_WIDTH))
+        self.query_one("#cards", VerticalScroll).styles.grid_size_columns = columns
 
     def on_input_changed(self, event: Input.Changed) -> None:
         query = event.value

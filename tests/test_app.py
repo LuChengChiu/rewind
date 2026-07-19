@@ -140,13 +140,15 @@ def test_reflow(authored, expected):
 
 
 @pytest.mark.asyncio
-async def test_card_width_is_capped_and_responsive():
-    for term_width, expected in [(50, 43), (200, 80)]:
+async def test_cards_reflow_into_columns_capped_by_max():
+    # Column count tracks terminal width (width // CARD_WIDTH) but never
+    # exceeds MAX_COLUMNS, so cards stay readable on very wide terminals.
+    for term_width, expected_columns in [(50, 1), (130, 2), (200, 3)]:
         app = VaultApp(vault_dir=FIXTURES)
         async with app.run_test(size=(term_width, 40)) as pilot:
             await pilot.pause()
-            card = next(iter(app.query(SessionCard)))
-            assert card.outer_size.width == expected
+            cards = app.query_one("#cards")
+            assert cards.styles.grid_size_columns == expected_columns
 
 
 @pytest.mark.asyncio
