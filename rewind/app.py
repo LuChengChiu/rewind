@@ -4,7 +4,8 @@ Reads every *.md in the vault directory, which `resolve_vault_dir` locates the
 same way the capture skill does ($REWIND_DIR, else ~/rewind) — so
 `rewind` works from anywhere, not only from inside the vault.
 Click a card (or press Enter on it) to copy the resume command; ctrl+r re-reads
-the vault (see `VaultApp._reload`).
+the vault (see `VaultApp._reload`); `d` on a focused card deletes it into
+`.trash/` after a confirmation (see `VaultApp.delete_session`).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from .vault import (
     matches,
     relative_time,
     resolve_vault_dir,
+    trash_session,
 )
 
 # harness -> (badge label, reverse-video chip color). Colors come from the
@@ -178,6 +180,43 @@ class PreviewScreen(ModalScreen[None]):
         self.dismiss()
 
 
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    """Are-you-sure for a delete, returning True only on an explicit yes.
+
+    `y` confirms rather than `enter`, and there is no default-accept: the reader
+    arrived here by pressing `d`, so enter is exactly the key they might still
+    have queued from copying a card. Every other route out — esc, `n` — cancels.
+    """
+
+    BINDINGS = [
+        Binding("y", "confirm", "Delete", priority=True),
+        Binding("escape,n", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(self, session: Session) -> None:
+        super().__init__()
+        self.session = session
+
+    def compose(self) -> ComposeResult:
+        # A broken card has no parsed title, so it is named by its filename —
+        # which is also the only thing its own card shows.
+        name = self.session.title or self.session.path.name
+        with Vertical(id="confirm"):
+            yield Label(f"Delete [b]{escape(name)}[/b]?", id="confirm-title")
+            yield Label(
+                f"[dim]{escape(self.session.path.name)} moves to .trash/ — "
+                "the file is kept, not erased.[/dim]",
+                id="confirm-body",
+            )
+            yield Label("delete [dim]y[/dim]   cancel [dim]esc / n[/dim]", id="confirm-hint")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class SessionCard(Static, can_focus=True):
     def __init__(self, session: Session) -> None:
         super().__init__()
@@ -196,6 +235,9 @@ class SessionCard(Static, can_focus=True):
                 "This file could not be used. Fix it by hand — nothing was hidden.",
                 classes="card-meta",
             )
+            # A broken file is the likeliest thing to want gone, so this branch
+            # gets the hint too — minus copy and preview, which it cannot do.
+            yield Label(self._hints(), classes="card-hint")
             return
 
         badge_text, badge_color = HARNESS_BADGES.get(
@@ -216,11 +258,26 @@ class SessionCard(Static, can_focus=True):
             yield Label(
                 " ".join(f"#{escape(t)}" for t in s.tags), classes="card-tags"
             )
-        # Only harnesses with a reader can preview; the rest simply never offer
-        # it. CSS reveals the hint on focus so idle cards stay uncluttered.
-        if supports_preview(s.harness):
-            yield Label("space preview", classes="card-hint")
+        yield Label(self._hints(), classes="card-hint")
         yield Label("", classes="card-flash")
+
+    def _hints(self) -> str:
+        """The action row: what this card can do, and the key that does it.
+
+        Action bright, key dim. Delete is the only entry every card has — copy
+        needs a resume command and preview needs a reader for the harness, so a
+        broken or unpreviewable card advertises only what it will actually do.
+        CSS reveals the row on focus, keeping idle cards uncluttered.
+        """
+        s = self.session
+        parts = []
+        if not s.error:
+            parts.append("copy [dim]enter[/dim]")
+            # Only harnesses with a reader can preview; the rest never offer it.
+            if supports_preview(s.harness):
+                parts.append("preview [dim]space[/dim]")
+        parts.append("delete [dim]d[/dim]")
+        return "   ".join(parts)
 
     def on_click(self) -> None:
         self.copy_command()
@@ -234,6 +291,15 @@ class SessionCard(Static, can_focus=True):
         if self.session.error or not supports_preview(self.session.harness):
             return
         self.app.push_screen(PreviewScreen(self.session))
+
+    def key_d(self) -> None:
+        # Card-level for the same reason as key_space: it only fires while the
+        # card itself has focus, so a `d` typed into the filter stays a search.
+        def on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self.app.run_worker(self.app.delete_session(self.session))
+
+        self.app.push_screen(ConfirmDeleteScreen(self.session), on_confirm)
 
     def copy_command(self) -> None:
         command = self.session.resume_command
@@ -339,7 +405,9 @@ class VaultApp(App):
     }
     .card-hint {
         display: none;
-        color: $text-muted;
+        /* Normal foreground, not $text-muted: the keys are dimmed inline so the
+           action names stay the brighter half of the pair. */
+        color: $text;
         margin-top: 1;
     }
     SessionCard:focus .card-hint {
@@ -351,6 +419,24 @@ class VaultApp(App):
     }
     PreviewScreen {
         align: center middle;
+    }
+    ConfirmDeleteScreen {
+        align: center middle;
+    }
+    #confirm {
+        width: 60;
+        max-width: 90%;
+        height: auto;
+        background: $surface;
+        border: round $error;
+        padding: 1 2;
+    }
+    #confirm-title, #confirm-body {
+        width: 100%;
+    }
+    #confirm-hint {
+        width: 100%;
+        margin-top: 1;
     }
     #preview {
         width: 90%;
@@ -448,6 +534,28 @@ class VaultApp(App):
         # touching the modal's own, which is what makes dismissing the preview
         # land on the filter instead of that same dead container.
         self.query_one("#filter", Input).focus()
+
+    async def delete_session(self, session: Session) -> None:
+        """Move one session to `.trash/` and rebuild the grid.
+
+        Reuses the reload path rather than removing the single card by hand:
+        one way to build the grid means the filter, the focus reset and the
+        empty state all keep working after a delete for free — deleting the
+        last session has to restore the empty state, which unmounting a lone
+        card would not do.
+        """
+        try:
+            target = trash_session(session, self.vault_dir)
+        except OSError as exc:
+            # H4: a delete that did not happen must say so, loudly.
+            self.notify(
+                f"Could not delete {session.path.name}: {exc}",
+                severity="error",
+                title="Not deleted",
+            )
+            return
+        await self._reload()
+        self.notify(f"Moved to {target.parent}", title="Deleted")
 
     async def action_reload(self) -> None:
         await self._reload()

@@ -51,7 +51,8 @@ Type to filter, click the card you want, and its resume command
 | type | Filter live — each word must fuzzy-match a word on some card |
 | click / <kbd>enter</kbd> | Copy that session's resume command; the card flashes `Copied ✓` |
 | <kbd>space</kbd> | Preview the session's actual conversation (focused card only) |
-| <kbd>esc</kbd> | Close the preview |
+| <kbd>d</kbd> | Delete the focused card — <kbd>y</kbd> confirms, <kbd>esc</kbd> / <kbd>n</kbd> cancels |
+| <kbd>esc</kbd> | Close the preview, or cancel a delete |
 | <kbd>ctrl+r</kbd> | Re-read the vault, keeping whatever you've typed in the filter |
 | <kbd>ctrl+c</kbd> / <kbd>ctrl+q</kbd> | Quit — press twice within 2s |
 
@@ -63,6 +64,10 @@ terminal width. A card that's malformed, missing fields, or from an unknown
 harness shows up in red with the reason — never silently dropped, and never
 hidden by the filter.
 
+Deleting never erases: the card moves into `.trash/` inside the vault
+(suffixed `-2`, `-3`, … on a name collision, never overwriting), where Rewind
+stops listing it but the file — and the resume command inside it — survives.
+
 ### Preview
 
 Focus a card and press <kbd>space</kbd> to read back the conversation itself.
@@ -70,9 +75,9 @@ Rewind reads the harness's own session storage at display time, read-only —
 for Claude Code, the JSONL transcript that the card's `cwd` + `session_id`
 locate exactly.
 
-Only harnesses with a reader can preview. Today that's `claude-code`; opencode
-cards simply offer no hint and <kbd>space</kbd> does nothing. That's a supported
-state, not an error.
+Only harnesses with a reader can preview. Today that's `claude-code`; an
+opencode card's hint row simply omits preview and <kbd>space</kbd> does
+nothing. That's a supported state, not an error.
 
 ## Configuration
 

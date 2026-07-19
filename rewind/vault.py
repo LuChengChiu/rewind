@@ -134,6 +134,36 @@ def load_vault(directory: Path) -> list[Session]:
     return sessions
 
 
+def trash_session(session: Session, vault_dir: Path) -> Path:
+    """Move a session's file into the vault's `.trash/`, returning where it went.
+
+    A move rather than an unlink: a capture is the only record of a session, and
+    the resume command inside it cannot be reconstructed once the file is gone.
+    `.trash` sits inside the vault so everything stays on one filesystem, and
+    because `load_vault` globs a single level it never re-reads what is in there.
+
+    Names collide as soon as the same capture is deleted twice, and overwriting
+    the older copy would defeat the point of not deleting in the first place —
+    so the target is claimed with `os.link`, which refuses to replace an
+    existing file, and a numeric suffix is tried until a claim sticks. Only
+    once the claim holds is the original removed; a crash in between leaves
+    two copies, never zero.
+    """
+    trash = vault_dir / ".trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    target = trash / session.path.name
+    counter = 2
+    while True:
+        try:
+            os.link(session.path, target)
+        except FileExistsError:
+            target = trash / f"{session.path.stem}-{counter}{session.path.suffix}"
+            counter += 1
+        else:
+            session.path.unlink()
+            return target
+
+
 def fuzzy_match(needle: str, haystack: str) -> bool:
     """True if needle's characters appear in order within haystack."""
     it = iter(haystack)

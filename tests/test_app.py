@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input, Label, Static
 
-from rewind.app import PreviewScreen, SessionCard, VaultApp, reflow
+from rewind.app import ConfirmDeleteScreen, PreviewScreen, SessionCard, VaultApp, reflow
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -359,10 +359,113 @@ async def test_missing_transcript_shows_error_not_empty_dialog(fake_home):
 
 
 @pytest.mark.asyncio
-async def test_preview_hint_only_on_previewable_cards():
+async def test_hint_row_advertises_only_what_the_card_can_do():
+    # Every card gets a hint row, but it lists actions the card actually has:
+    # preview needs a reader for the harness, copy needs a resume command.
     app = VaultApp(vault_dir=FIXTURES)
     async with app.run_test():
         for card in app.query(SessionCard):
-            hints = card.query(".card-hint")
-            expected = 1 if card.session.harness == "claude-code" and not card.session.error else 0
-            assert len(hints) == expected, card.session.path.name
+            [hint] = card.query(".card-hint")
+            shown = str(hint.content)
+            assert "delete" in shown, card.session.path.name
+            if card.session.error:
+                assert "copy" not in shown
+                assert "preview" not in shown
+            else:
+                assert "copy" in shown
+                assert ("preview" in shown) is (card.session.harness == "claude-code")
+
+
+@pytest.mark.asyncio
+async def test_d_moves_the_session_to_trash(live_vault):
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        card = next(c for c in app.query(SessionCard) if not c.session.error)
+        doomed = card.session
+        card.focus()
+        await pilot.pause()
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmDeleteScreen)
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert not doomed.path.exists()
+        # Moved, not erased — the capture is the only record of the session.
+        assert (live_vault / ".trash" / doomed.path.name).exists()
+        assert doomed.title not in [c.session.title for c in app.query(SessionCard)]
+
+
+@pytest.mark.asyncio
+async def test_escape_cancels_the_delete(live_vault):
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        card = next(c for c in app.query(SessionCard) if not c.session.error)
+        spared = card.session
+        card.focus()
+        await pilot.pause()
+
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert spared.path.exists()
+        assert not (live_vault / ".trash").exists()
+        assert len(app.query(SessionCard)) == 3
+
+
+@pytest.mark.asyncio
+async def test_d_in_the_filter_is_typed_not_a_delete(live_vault):
+    # The filter holds focus from launch, so a card-level binding is the only
+    # thing keeping "docker" from deleting three sessions.
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        assert app.focused is app.query_one("#filter", Input)
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, ConfirmDeleteScreen)
+        assert app.query_one("#filter", Input).value == "d"
+        assert len(list(live_vault.glob("*.md"))) == 3
+
+
+@pytest.mark.asyncio
+async def test_broken_card_can_be_deleted(live_vault):
+    # The main reason delete exists: a malformed file otherwise sits there
+    # forever, since it cannot be copied or previewed either.
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test() as pilot:
+        card = next(c for c in app.query(SessionCard) if c.session.error)
+        doomed = card.session
+        card.focus()
+        await pilot.pause()
+
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert not doomed.path.exists()
+        assert (live_vault / ".trash" / doomed.path.name).exists()
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_last_session_restores_the_empty_state(tmp_path):
+    # Reusing the reload path is what makes this work; unmounting a lone card
+    # would leave a blank grid with no empty state.
+    _capture(tmp_path, "2026-07-19-only.md", "only one")
+    app = VaultApp(vault_dir=tmp_path)
+    async with app.run_test() as pilot:
+        card = next(iter(app.query(SessionCard)))
+        card.focus()
+        await pilot.pause()
+
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert len(app.query(SessionCard)) == 0
+        assert len(app.query("#empty")) == 1

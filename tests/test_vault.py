@@ -7,6 +7,7 @@ from rewind.vault import (
     matches,
     relative_time,
     resolve_vault_dir,
+    trash_session,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -70,6 +71,39 @@ def test_unknown_harness_is_an_error(tmp_path):
     [session] = load_vault(tmp_path)
     assert session.error is not None
     assert session.resume_command is None
+
+
+def test_trash_session_moves_the_file(tmp_path):
+    (tmp_path / "x.md").write_text(
+        "---\nharness: claude-code\nsession_id: abc\ncwd: /tmp\n"
+        "title: t\ncaptured_at: 2026-07-01T00:00:00+08:00\n---\nbody\n"
+    )
+    [session] = load_vault(tmp_path)
+    target = trash_session(session, tmp_path)
+
+    assert not session.path.exists()
+    assert target == tmp_path / ".trash" / "x.md"
+    assert "body" in target.read_text()
+    # A single-level glob, so the vault no longer sees it.
+    assert load_vault(tmp_path) == []
+
+
+def test_trash_session_keeps_an_earlier_copy_of_the_same_name(tmp_path):
+    # Same filename deleted twice: overwriting would erase the first capture,
+    # which is exactly what moving instead of unlinking is meant to prevent.
+    trashed = []
+    for body in ("first", "second"):
+        (tmp_path / "x.md").write_text(
+            "---\nharness: claude-code\nsession_id: abc\ncwd: /tmp\n"
+            f"title: t\ncaptured_at: 2026-07-01T00:00:00+08:00\n---\n{body}\n"
+        )
+        [session] = load_vault(tmp_path)
+        trashed.append(trash_session(session, tmp_path))
+
+    assert trashed[0].name == "x.md"
+    assert trashed[1].name == "x-2.md"
+    assert "first" in trashed[0].read_text()
+    assert "second" in trashed[1].read_text()
 
 
 def test_fuzzy_filter():
