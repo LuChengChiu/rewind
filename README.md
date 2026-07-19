@@ -64,9 +64,12 @@ terminal width. A card that's malformed, missing fields, or from an unknown
 harness shows up in red with the reason — never silently dropped, and never
 hidden by the filter.
 
-Deleting never erases: the card moves into `.trash/` inside the vault
-(suffixed `-2`, `-3`, … on a name collision, never overwriting), where Rewind
-stops listing it but the file — and the resume command inside it — survives.
+Deleting never erases on the spot: the card moves into `.trash/` inside the
+vault (suffixed `-2`, `-3`, … on a name collision, never overwriting), where
+Rewind stops listing it but the file — and the resume command inside it —
+survives. Trashed captures are kept for 14 days from deletion, then erased at
+the next launch; a toast reports every purge. Set `REWIND_TRASH_DAYS` to
+change the window, or to `0` to keep trash forever.
 
 ### Preview
 
@@ -84,6 +87,7 @@ nothing. That's a supported state, not an error.
 | | |
 | --- | --- |
 | `REWIND_DIR` | Where cards live. Defaults to `~/rewind/`. Read and write resolve it the same way, so the skill and the TUI always agree. |
+| `REWIND_TRASH_DAYS` | How many days deleted cards sit in `.trash/` before the launch-time purge erases them. Defaults to `14` — unset and empty both mean the default, like `REWIND_DIR`; `0` (or any other value that isn't a positive integer) turns purging off. |
 | `REWIND_NO_UPDATE=1` | Disable auto-update. |
 
 ### Auto-update

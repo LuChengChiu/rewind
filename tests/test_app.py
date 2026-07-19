@@ -1,10 +1,14 @@
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Input, Label, Static
 
+from conftest import write_capture
 from rewind.app import ConfirmDeleteScreen, PreviewScreen, SessionCard, VaultApp, reflow
+from rewind.vault import SECONDS_PER_DAY
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -53,26 +57,13 @@ def live_vault(tmp_path):
     return tmp_path
 
 
-def _capture(vault: Path, name: str, title: str) -> None:
-    (vault / name).write_text(
-        "---\n"
-        "harness: claude-code\n"
-        "session_id: 11111111-2222-3333-4444-555555555555\n"
-        "cwd: /Users/x/proj\n"
-        f"title: {title}\n"
-        "captured_at: 2026-07-19T12:00:00+08:00\n"
-        "---\n\n"
-        "captured after the TUI was already running\n"
-    )
-
-
 @pytest.mark.asyncio
 async def test_ctrl_r_picks_up_a_session_captured_while_running(live_vault):
     app = VaultApp(vault_dir=live_vault)
     async with app.run_test() as pilot:
         assert len(app.query(SessionCard)) == 3
 
-        _capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
+        write_capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
         await pilot.press("ctrl+r")
         await pilot.pause()
 
@@ -90,7 +81,7 @@ async def test_reload_keeps_the_active_filter(live_vault):
         app.query_one("#filter", Input).value = "logger"
         await pilot.pause()
 
-        _capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
+        write_capture(live_vault, "2026-07-19-late-arrival.md", "late arrival")
         await pilot.press("ctrl+r")
         await pilot.pause()
 
@@ -114,7 +105,7 @@ async def test_reload_from_empty_vault_replaces_the_empty_state(tmp_path):
     async with app.run_test() as pilot:
         assert len(app.query(SessionCard)) == 0
 
-        _capture(tmp_path, "2026-07-19-first.md", "first one")
+        write_capture(tmp_path, "2026-07-19-first.md", "first one")
         await pilot.press("ctrl+r")
         await pilot.pause()
 
@@ -468,10 +459,32 @@ async def test_broken_card_can_be_deleted(live_vault):
 
 
 @pytest.mark.asyncio
+async def test_startup_purges_expired_trash(live_vault, monkeypatch):
+    # Wiring check: launch runs the purge (vault-level behavior is covered in
+    # test_vault). The clock is swapped only inside rewind.vault — shifting
+    # time.time globally would reach Textual's own internals.
+    import rewind.vault as vault_module
+
+    trash = live_vault / ".trash"
+    trash.mkdir()
+    write_capture(trash, "expired.md", "long gone")
+    monkeypatch.delenv("REWIND_TRASH_DAYS", raising=False)
+    monkeypatch.setattr(
+        vault_module, "time", SimpleNamespace(time=lambda: time.time() + 15 * SECONDS_PER_DAY)
+    )
+
+    app = VaultApp(vault_dir=live_vault)
+    async with app.run_test():
+        assert not (trash / "expired.md").exists()
+        # Only .trash/ is purged; the vault itself is untouched.
+        assert len(app.query(SessionCard)) == 3
+
+
+@pytest.mark.asyncio
 async def test_deleting_the_last_session_restores_the_empty_state(tmp_path):
     # Reusing the reload path is what makes this work; unmounting a lone card
     # would leave a blank grid with no empty state.
-    _capture(tmp_path, "2026-07-19-only.md", "only one")
+    write_capture(tmp_path, "2026-07-19-only.md", "only one")
     app = VaultApp(vault_dir=tmp_path)
     async with app.run_test() as pilot:
         card = next(iter(app.query(SessionCard)))

@@ -5,7 +5,9 @@ same way the capture skill does ($REWIND_DIR, else ~/rewind) — so
 `rewind` works from anywhere, not only from inside the vault.
 Click a card (or press Enter on it) to copy the resume command; ctrl+r re-reads
 the vault (see `VaultApp._reload`); `d` on a focused card deletes it into
-`.trash/` after a confirmation (see `VaultApp.delete_session`).
+`.trash/` after a confirmation (see `VaultApp.delete_session`), where it is
+kept for $REWIND_TRASH_DAYS days (default 14) before a launch-time purge
+erases it for good (see `VaultApp._purge_trash`).
 """
 
 from __future__ import annotations
@@ -32,7 +34,9 @@ from .vault import (
     Session,
     load_vault,
     matches,
+    purge_trash,
     relative_time,
+    resolve_trash_days,
     resolve_vault_dir,
     trash_session,
 )
@@ -215,8 +219,16 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
                 if self.session.title
                 else "Moves"
             )
+            # The promise must match what the purge actually does, so the
+            # retention window is re-read here rather than hard-coded.
+            days = resolve_trash_days()
+            kept = (
+                f"kept {days} days, then purged"
+                if days is not None
+                else "kept, not erased"
+            )
             yield Label(
-                f"[dim]{fate} to .trash/ — the file is kept, not erased.[/dim]",
+                f"[dim]{fate} to .trash/ — {kept}.[/dim]",
                 id="confirm-body",
             )
             yield Label("delete [dim]y[/dim]   cancel [dim]esc/n[/dim]", id="confirm-hint")
@@ -530,7 +542,37 @@ class VaultApp(App):
     async def on_mount(self) -> None:
         self.register_theme(BITCOIN_DEFI)
         self.theme = "bitcoin-defi"
+        self._purge_trash()
         await self._reload()
+
+    def _purge_trash(self) -> None:
+        """Expire old trash once per launch — never on ctrl+r.
+
+        Startup is the one moment erasure is predictable; tying it to reload
+        would turn a habitual ctrl+r into the thing that empties the trash.
+        """
+        days = resolve_trash_days()
+        if days is None:
+            return
+        removed, failed = purge_trash(self.vault_dir, days)
+        # H4's spirit applies to purging too: destruction — and destruction
+        # that failed to happen on schedule — must say so; only "nothing was
+        # due" stays silent.
+        if removed:
+            count = len(removed)
+            self.notify(
+                f"Purged {count} trashed session{'s' if count != 1 else ''} "
+                f"older than {days} days",
+                title="Rewind",
+            )
+        if failed:
+            count = len(failed)
+            self.notify(
+                f"{count} expired trashed session{'s' if count != 1 else ''} "
+                "could not be erased; will retry next launch",
+                title="Rewind",
+                severity="warning",
+            )
 
     async def _reload(self) -> None:
         """Re-read the vault and rebuild the grid from scratch.

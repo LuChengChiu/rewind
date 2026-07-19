@@ -10,6 +10,7 @@ shown loudly in the TUI, never silently dropped.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ COMMAND_TEMPLATES: dict[str, str] = {
     "claude-code": "claude --resume {session_id}",
     "opencode": "opencode -s {session_id}",
 }
+
+SECONDS_PER_DAY = 86400
 
 
 def resolve_vault_dir() -> Path:
@@ -42,6 +45,63 @@ def resolve_vault_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / "rewind"
+
+
+def resolve_trash_days() -> int | None:
+    """How many days a trashed capture is kept before `purge_trash` erases it.
+
+    ``$REWIND_TRASH_DAYS`` if set, otherwise 14; empty means unset, like
+    ``$REWIND_DIR``. Returning None turns purging off entirely — and that is
+    where every unusable value lands: purging is the only destruction in the
+    codebase, so a typo (``14d``) or a non-positive number must mean "keep
+    everything", never "purge on the default schedule". ``0`` is therefore
+    the documented off switch, not "purge immediately".
+    """
+    raw = os.environ.get("REWIND_TRASH_DAYS")
+    if raw is None or not raw.strip():
+        return 14
+    try:
+        days = int(raw)
+    except ValueError:
+        return None
+    return days if days > 0 else None
+
+
+def purge_trash(
+    vault_dir: Path, days: int, *, now: float | None = None
+) -> tuple[list[Path], list[Path]]:
+    """Erase captures older than ``days`` from `.trash/`.
+
+    Returns ``(removed, failed)``: what was erased, and what should have been
+    but could not be stat'ed or unlinked. Failures stay put — retention is the
+    safe state, and the next launch retries — but they are the caller's to
+    report: trash silently outliving its promised window would break "never
+    silently dropped".
+
+    Age runs from *deletion*, not capture: `trash_session` stamps the file's
+    mtime the moment it enters the trash. ``max(mtime, ctime)`` covers files
+    trashed before that stamp existed — `os.link` bumped their inode ctime at
+    that moment — and where the reasoning fails, max errs toward the newer
+    stamp, i.e. toward keeping. (On Windows ``st_ctime`` is creation time,
+    not inode-change time, so there only the mtime stamp is meaningful and
+    pre-stamp trash ages from capture at worst.)
+
+    Only ``*.md`` is considered; anything else in `.trash/` was put there by
+    someone else and is not ours to erase.
+    """
+    cutoff = (now if now is not None else time.time()) - days * SECONDS_PER_DAY
+    removed: list[Path] = []
+    failed: list[Path] = []
+    for path in sorted((vault_dir / ".trash").glob("*.md")):
+        try:
+            st = path.stat()
+            if max(st.st_mtime, st.st_ctime) < cutoff:
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            failed.append(path)
+    return removed, failed
+
 
 REQUIRED_KEYS = ("harness", "session_id", "cwd", "title", "captured_at")
 
@@ -145,9 +205,11 @@ def trash_session(session: Session, vault_dir: Path) -> Path:
     Names collide as soon as the same capture is deleted twice, and overwriting
     the older copy would defeat the point of not deleting in the first place —
     so the target is claimed with `os.link`, which refuses to replace an
-    existing file, and a numeric suffix is tried until a claim sticks. Only
-    once the claim holds is the original removed; a crash in between leaves
-    two copies, never zero.
+    existing file, and a numeric suffix is tried until a claim sticks. Once
+    the claim holds the file's mtime is stamped to now — `purge_trash` ages
+    trash from that stamp, and the link would otherwise carry the capture's
+    old mtime along — and only then is the original removed; a crash in
+    between leaves two copies, never zero.
     """
     trash = vault_dir / ".trash"
     trash.mkdir(parents=True, exist_ok=True)
@@ -160,6 +222,7 @@ def trash_session(session: Session, vault_dir: Path) -> Path:
             target = trash / f"{session.path.stem}-{counter}{session.path.suffix}"
             counter += 1
         else:
+            os.utime(target)
             session.path.unlink()
             return target
 

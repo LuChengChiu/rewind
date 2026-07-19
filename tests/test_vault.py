@@ -1,11 +1,17 @@
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
+from conftest import write_capture
 from rewind.vault import (
+    SECONDS_PER_DAY,
     fuzzy_match,
     load_vault,
     matches,
+    purge_trash,
     relative_time,
+    resolve_trash_days,
     resolve_vault_dir,
     trash_session,
 )
@@ -104,6 +110,109 @@ def test_trash_session_keeps_an_earlier_copy_of_the_same_name(tmp_path):
     assert trashed[1].name == "x-2.md"
     assert "first" in trashed[0].read_text()
     assert "second" in trashed[1].read_text()
+
+
+def test_resolve_trash_days_defaults_to_14(monkeypatch):
+    monkeypatch.delenv("REWIND_TRASH_DAYS", raising=False)
+    assert resolve_trash_days() == 14
+
+
+def test_resolve_trash_days_honors_env(monkeypatch):
+    monkeypatch.setenv("REWIND_TRASH_DAYS", "30")
+    assert resolve_trash_days() == 30
+
+
+def test_resolve_trash_days_treats_empty_env_as_unset(monkeypatch):
+    monkeypatch.setenv("REWIND_TRASH_DAYS", "")
+    assert resolve_trash_days() == 14
+
+
+def test_resolve_trash_days_fails_toward_keeping(monkeypatch):
+    # Purging is destructive, so every unusable value must mean "never purge",
+    # not "purge on the default schedule". 0 doubles as the off switch.
+    for raw in ("0", "-3", "14d", "two weeks"):
+        monkeypatch.setenv("REWIND_TRASH_DAYS", raw)
+        assert resolve_trash_days() is None, raw
+
+
+def test_purge_trash_erases_only_expired_captures(tmp_path):
+    write_capture(tmp_path)
+    [session] = load_vault(tmp_path)
+    target = trash_session(session, tmp_path)
+
+    # Freshly trashed: survives a purge today…
+    assert purge_trash(tmp_path, 14) == ([], [])
+    assert target.exists()
+    # …but not one run 15 days from now.
+    assert purge_trash(tmp_path, 14, now=time.time() + 15 * SECONDS_PER_DAY) == (
+        [target],
+        [],
+    )
+    assert not target.exists()
+
+
+def test_trash_session_stamps_deletion_time(tmp_path):
+    # The link would carry the capture's old mtime into .trash/; trash_session
+    # re-stamps it so purge_trash ages from deletion on every platform.
+    write_capture(tmp_path)
+    stale = time.time() - 100 * SECONDS_PER_DAY
+    os.utime(tmp_path / "x.md", (stale, stale))
+    [session] = load_vault(tmp_path)
+
+    target = trash_session(session, tmp_path)
+
+    assert abs(target.stat().st_mtime - time.time()) < 60
+
+
+def test_purge_trash_ages_by_deletion_time_not_capture_time(tmp_path):
+    # Files trashed before trash_session stamped mtime have the capture's old
+    # mtime but a ctime bumped at deletion — a months-old capture trashed just
+    # now must survive a purge today. utime back-dates mtime while itself
+    # refreshing ctime, which reproduces that legacy shape.
+    trash = tmp_path / ".trash"
+    trash.mkdir()
+    write_capture(trash, "old.md")
+    stale = time.time() - 100 * SECONDS_PER_DAY
+    os.utime(trash / "old.md", (stale, stale))
+
+    assert purge_trash(tmp_path, 14) == ([], [])
+    assert (trash / "old.md").exists()
+
+
+def test_purge_trash_leaves_non_captures_alone(tmp_path):
+    trash = tmp_path / ".trash"
+    trash.mkdir()
+    (trash / "notes.txt").write_text("not a capture")
+    write_capture(trash)
+
+    removed, failed = purge_trash(tmp_path, 14, now=time.time() + 100 * SECONDS_PER_DAY)
+
+    assert removed == [trash / "x.md"]
+    assert failed == []
+    assert (trash / "notes.txt").exists()
+
+
+def test_purge_trash_reports_what_it_could_not_erase(tmp_path):
+    # A read-only .trash/ denies the unlink; the failure must come back to the
+    # caller instead of vanishing — trash outliving its window is not silent.
+    trash = tmp_path / ".trash"
+    trash.mkdir()
+    write_capture(trash)
+    os.chmod(trash, 0o500)
+    try:
+        removed, failed = purge_trash(
+            tmp_path, 14, now=time.time() + 100 * SECONDS_PER_DAY
+        )
+    finally:
+        os.chmod(trash, 0o700)
+
+    assert removed == []
+    assert failed == [trash / "x.md"]
+    assert (trash / "x.md").exists()
+
+
+def test_purge_trash_without_a_trash_dir(tmp_path):
+    assert purge_trash(tmp_path, 14) == ([], [])
 
 
 def test_fuzzy_filter():
