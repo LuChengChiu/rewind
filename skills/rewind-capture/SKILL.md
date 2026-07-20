@@ -95,13 +95,14 @@ date -Iseconds                                 # → captured_at field
 Write `title` and `summary` yourself from the conversation:
 
 - **title**: one line, specific enough to recognize three weeks later.
-- **summary**: 2–4 sentences of prose in the body. This is a "find my way
-  back" note, not a changelog: the reader is the user three weeks later, and
-  the card must answer what this session was, what is still open, and the
-  concrete next step. Anything already recoverable from the repo (commits,
-  diffs, test results, decisions that got superseded) is dead weight — keep
-  only what can't be reconstructed: open problems, subtle traps discovered,
-  what the work is blocked on, and the next action.
+- **summary**: **80 words max, one paragraph, hard limit.** Count them. If you
+  are over, cut — do not reformat into more paragraphs. This is a "find my way
+  back" note, not a changelog: the reader is the user three weeks later.
+  Answer only two things: what is still open, and the concrete next step.
+  Anything recoverable from the repo (commits, diffs, test results, superseded
+  decisions, file paths you already wrote down elsewhere) is dead weight. If
+  something needs more room than that, it belongs in a handoff doc — link it,
+  don't inline it.
 
   Bad (changelog): "Started as a review of X. Findings led to dropping Y
   (62 tests pass). Then the user overruled Z, so …"
