@@ -8,6 +8,12 @@ the vault (see `VaultApp._reload`); `d` on a focused card deletes it into
 `.trash/` after a confirmation (see `VaultApp.delete_session`), where it is
 kept for $REWIND_TRASH_DAYS days (default 14) before a launch-time purge
 erases it for good (see `VaultApp._purge_trash`).
+
+The vault stays global — finding "that thing I did in some other repo" is half
+the point — so ctrl+f narrows the grid to cards captured in the launch
+directory instead (see `VaultApp.action_toggle_scope`). The ⚙ dialog sets only
+what that toggle *starts* as, persisted per-vault in `settings.json`; it is an
+initial state, never a mode or a lock.
 """
 
 from __future__ import annotations
@@ -23,21 +29,24 @@ from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, Static
 
 from .theme import BITCOIN_DEFI, PALETTE
 from .transcript import TranscriptError, read_transcript, supports_preview
 from .update import maybe_update_in_background
 from .vault import (
     Session,
+    load_scope_default,
     load_vault,
     matches,
     purge_trash,
     relative_time,
     resolve_trash_days,
     resolve_vault_dir,
+    same_dir,
+    save_scope_default,
     trash_session,
 )
 
@@ -240,6 +249,44 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class SettingsScreen(ModalScreen[bool | None]):
+    """Sets the scope toggle's *startup* state — nothing else.
+
+    Dismisses with the new default on Save, or None on any cancel, so the
+    caller can tell "saved False" from "did not save". The dialog deliberately
+    never touches the current session's toggle: making live scope jump from a
+    settings dialog would change what is on screen for a reason the reader did
+    not ask for. The setting is an initial state, not a mode and not a lock.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, scope_default: bool) -> None:
+        super().__init__()
+        self.scope_default = scope_default
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings"):
+            yield Label("Settings", id="settings-title")
+            yield Checkbox(
+                'Start with "only here" on',
+                value=self.scope_default,
+                id="settings-scope",
+            )
+            with Horizontal(id="settings-buttons"):
+                yield Button("Save", id="settings-save", variant="primary")
+                yield Button("Cancel", id="settings-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-save":
+            self.dismiss(self.query_one("#settings-scope", Checkbox).value)
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SessionCard(Static, can_focus=True):
     def __init__(self, session: Session) -> None:
         super().__init__()
@@ -360,24 +407,41 @@ class VaultApp(App):
 
     # priority=True so these fire even while the filter Input has focus, and so
     # ctrl+c reaches us instead of Textual's built-in handling.
-    # ctrl+r rather than a bare `r` for the same reason space previews only from
-    # a focused card: plain letters belong to the filter Input, which holds
-    # focus from launch. It is app-level (not card-level) so it still works on
-    # an empty vault, where there is no card to focus and reloading is the whole
-    # point.
+    # ctrl+r and ctrl+f rather than bare `r` and `f`, for the same reason space
+    # previews only from a focused card: plain letters belong to the filter
+    # Input, which holds focus from launch. Both are app-level (not card-level)
+    # so they still work on an empty vault, where there is no card to focus and
+    # reloading is the whole point.
     BINDINGS = [
         Binding("ctrl+c", "quit_with_toast", "Quit", priority=True),
         Binding("ctrl+q", "quit_with_toast", "Quit", priority=True),
         Binding("ctrl+r", "reload", "Reload", priority=True),
+        Binding("ctrl+f", "toggle_scope", "Scope", priority=True),
     ]
 
     CSS = """
     Screen {
         layout: vertical;
     }
-    #filter {
+    #toolbar {
         dock: top;
+        height: auto;
         margin: 0 1;
+    }
+    #filter {
+        /* Takes whatever the two buttons leave, so the search stays the widest
+           thing in the row at any terminal width. */
+        width: 1fr;
+    }
+    #scope, #settings-open {
+        min-width: 0;
+        height: 3;
+        margin-left: 1;
+    }
+    #scope-notice {
+        display: none;
+        padding: 1 2;
+        color: $text-muted;
     }
     #cards {
         padding: 0 1;
@@ -481,6 +545,31 @@ class VaultApp(App):
         width: 100%;
         margin-top: 1;
     }
+    SettingsScreen {
+        align: center middle;
+    }
+    #settings {
+        width: 50;
+        max-width: 90%;
+        height: auto;
+        background: $surface;
+        border: round $accent;
+        padding: 1 2;
+    }
+    #settings-title {
+        width: 100%;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #settings-buttons {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #settings-buttons Button {
+        min-width: 0;
+        margin-left: 1;
+    }
     #preview {
         width: 90%;
         max-width: 100;
@@ -530,14 +619,43 @@ class VaultApp(App):
     CARD_WIDTH = 46
     MAX_COLUMNS = 3
 
-    def __init__(self, vault_dir: Path | None = None) -> None:
+    def __init__(
+        self, vault_dir: Path | None = None, launch_dir: str | None = None
+    ) -> None:
         super().__init__()
         self.vault_dir = vault_dir or resolve_vault_dir()
+        # Captured once, here, rather than re-read per filter pass: the scope is
+        # "the folder Rewind was opened in", which cannot change while it runs.
+        self.launch_dir = launch_dir or str(Path.cwd())
         self.sessions: list[Session] = []
+        # Paths of the sessions captured in the launch dir, rebuilt by
+        # `_reload` — see the comment there for why it is not computed per
+        # filter pass.
+        self._scoped_paths: set[Path] = set()
+        # Two separate pieces of state on purpose. `scope_default` is what
+        # settings.json holds and what the dialog edits; `scope_cwd` is the live
+        # toggle, seeded from it at startup and free to diverge for the rest of
+        # the session. Collapsing them would turn the setting into a lock.
+        self.scope_default = load_scope_default(self.vault_dir)
+        self.scope_cwd = self.scope_default
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="type to filter…", id="filter")
+        with Horizontal(id="toolbar"):
+            yield Input(placeholder="type to filter…", id="filter")
+            yield Button(self._scope_label(), id="scope")
+            yield Button("⚙", id="settings-open")
+        # Outside #cards, which is a grid: a notice mounted in there would be
+        # laid out as one narrow grid cell instead of a full-width line.
+        yield Static("", id="scope-notice")
         yield VerticalScroll(id="cards")
+
+    def _scope_label(self) -> str:
+        """The scope button's text, which is also how the state is read.
+
+        The label states the mode rather than the action, so the current scope
+        is visible without opening or pressing anything.
+        """
+        return "◉ only here" if self.scope_cwd else "○ all folders"
 
     async def on_mount(self) -> None:
         self.register_theme(BITCOIN_DEFI)
@@ -584,6 +702,14 @@ class VaultApp(App):
         every freshly mounted card.
         """
         self.sessions = load_vault(self.vault_dir)
+        # Scope membership is settled here, not in `_apply_filter`: a card's
+        # cwd can only change through a reload and the launch dir never
+        # changes, so resolving it per keystroke would realpath — an lstat per
+        # path component — every card on every character typed, for an answer
+        # that cannot differ from the last one.
+        self._scoped_paths = {
+            s.path for s in self.sessions if same_dir(s.cwd, self.launch_dir)
+        }
         cards = self.query_one("#cards", VerticalScroll)
         await cards.remove_children()
         if self.sessions:
@@ -600,6 +726,9 @@ class VaultApp(App):
                     id="empty",
                 )
             )
+            # An empty vault is already explained by the line above; blaming
+            # the scope filter on top of it would be both redundant and wrong.
+            self.query_one("#scope-notice", Static).display = False
         # Rebuilding destroys whatever card had focus, and Textual parks focus
         # on the scroll container — which swallows keys without being an input,
         # so the filter would look dead until clicked. Unconditional on purpose:
@@ -647,11 +776,91 @@ class VaultApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         self._apply_filter(event.value)
 
+    def _in_scope(self, session: Session) -> bool:
+        return not self.scope_cwd or session.path in self._scoped_paths
+
     def _apply_filter(self, query: str) -> None:
+        visible = 0
         for card in self.query(SessionCard):
-            card.display = card.session.error is not None or matches(
-                query, card.session
+            # The scope condition is ANDed with the text query — both are live
+            # at once and neither clears the other — but the broken-card
+            # exemption sits outside both. `load_session` leaves cwd="" on a
+            # parse failure, so scoping a broken card would hide every one of
+            # them, which is exactly what H4 forbids.
+            card.display = card.session.error is not None or (
+                self._in_scope(card.session) and matches(query, card.session)
             )
+            # Count only healthy cards: broken cards are exempt from scoping,
+            # so counting them would silence the notice exactly when the grid
+            # shows nothing but an error card.
+            if card.display and card.session.error is None:
+                visible += 1
+        self._update_scope_notice(visible, query)
+
+    def _update_scope_notice(self, visible: int, query: str) -> None:
+        """Explain an empty grid that the scope filter, not the reader, caused.
+
+        `visible` counts healthy cards only — a grid holding nothing but a
+        broken card still needs the explanation, since the reader's real
+        sessions are just as hidden either way.
+
+        Only when nothing was typed: a blank grid under a typed query is
+        existing behaviour and needs no explanation, because the reader knows
+        what they typed. With the setting on and no query, though, opening
+        Rewind in a folder that has no captures is indistinguishable from a
+        broken app — so the line names the folder and the way back out.
+        """
+        notice = self.query_one("#scope-notice", Static)
+        show = self.scope_cwd and visible == 0 and not query.strip()
+        if show:
+            notice.update(
+                f"No sessions captured in {escape(self.launch_dir)}. "
+                "Press ctrl+f to show every folder."
+            )
+        notice.display = show
+
+    def action_toggle_scope(self) -> None:
+        self.scope_cwd = not self.scope_cwd
+        self.query_one("#scope", Button).label = self._scope_label()
+        self._apply_filter(self.query_one("#filter", Input).value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # A clicked Button keeps focus, which would leave the filter dead to
+        # every later keystroke — the same trap `_reload` guards against — so
+        # both branches hand focus straight back. For the settings screen the
+        # hand-back happens *before* push_screen: Textual restores focus to the
+        # previously focused widget on dismiss, and that must be the filter,
+        # not this button.
+        if event.button.id == "scope":
+            self.action_toggle_scope()
+            self.query_one("#filter", Input).focus()
+        elif event.button.id == "settings-open":
+            self.query_one("#filter", Input).focus()
+            self.push_screen(SettingsScreen(self.scope_default), self._save_settings)
+
+    def _save_settings(self, scope_default: bool | None) -> None:
+        """Write the new startup default, if the dialog was saved rather than cancelled.
+
+        None means cancel, so the stored setting is left untouched. Note this
+        never touches `self.scope_cwd`: the dialog sets what the toggle starts
+        as next launch, not what it is right now.
+        """
+        if scope_default is None:
+            return
+        try:
+            save_scope_default(self.vault_dir, scope_default)
+        except OSError as exc:
+            # H4: a write that did not happen must say so, rather than let the
+            # reader believe the preference stuck.
+            self.notify(
+                f"Could not save settings: {exc}",
+                severity="error",
+                title="Not saved",
+            )
+            return
+        self.scope_default = scope_default
+        state = "on" if scope_default else "off"
+        self.notify(f'Rewind will start with "only here" {state}', title="Settings")
 
     _quit_pending = False
 

@@ -7,12 +7,15 @@ from conftest import write_capture
 from rewind.vault import (
     SECONDS_PER_DAY,
     fuzzy_match,
+    load_scope_default,
     load_vault,
     matches,
     purge_trash,
     relative_time,
     resolve_trash_days,
     resolve_vault_dir,
+    same_dir,
+    save_scope_default,
     trash_session,
 )
 
@@ -228,3 +231,66 @@ def test_fuzzy_filter():
 def test_relative_time():
     assert relative_time(None) == "unknown time"
     assert relative_time(datetime.now().astimezone()) == "just now"
+
+
+def test_same_dir_matches_a_symlinked_spelling(tmp_path):
+    # The capture skill writes `pwd` (logical), the TUI reads Path.cwd()
+    # (resolved). On macOS that is /tmp vs /private/tmp every day, so the two
+    # spellings of one folder have to compare equal.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert same_dir(str(link), str(real))
+
+
+def test_same_dir_ignores_trailing_slashes(tmp_path):
+    assert same_dir(f"{tmp_path}/", str(tmp_path))
+
+
+def test_same_dir_is_exact_not_prefix(tmp_path):
+    # Prefix matching would make launching from a parent show everything below
+    # it, which defeats the point of narrowing.
+    child = tmp_path / "child"
+    child.mkdir()
+    assert not same_dir(str(child), str(tmp_path))
+
+
+def test_same_dir_never_matches_an_empty_path(tmp_path):
+    # A broken card carries cwd="" and realpath("") is the process cwd, so
+    # without the guard broken cards would match by accident.
+    assert not same_dir("", str(tmp_path))
+    assert not same_dir(str(tmp_path), "")
+
+
+def test_scope_default_round_trips(tmp_path):
+    save_scope_default(tmp_path, True)
+    assert load_scope_default(tmp_path) is True
+    save_scope_default(tmp_path, False)
+    assert load_scope_default(tmp_path) is False
+
+
+def test_scope_default_is_off_when_settings_are_missing(tmp_path):
+    assert load_scope_default(tmp_path) is False
+
+
+def test_scope_default_is_off_when_settings_are_corrupt(tmp_path):
+    # A preference must never be able to stop Rewind opening, and the failure
+    # direction is "show more" — never "show nothing".
+    (tmp_path / "settings.json").write_text("{not json at all")
+    assert load_scope_default(tmp_path) is False
+
+
+def test_scope_default_is_off_when_settings_have_the_wrong_shape(tmp_path):
+    (tmp_path / "settings.json").write_text('["scope_cwd"]')
+    assert load_scope_default(tmp_path) is False
+
+
+def test_settings_file_is_not_loaded_as_a_card(tmp_path):
+    # load_vault globs *.md, so settings.json can never be mistaken for a
+    # capture — which is why it is allowed to live in the vault dir at all.
+    save_scope_default(tmp_path, True)
+    write_capture(tmp_path, "a.md")
+    sessions = load_vault(tmp_path)
+    assert len(sessions) == 1
+    assert sessions[0].error is None

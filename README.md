@@ -53,6 +53,7 @@ Type to filter, click the card you want, and its resume command
 | <kbd>space</kbd> | Preview the session's actual conversation (focused card only) |
 | <kbd>d</kbd> | Delete the focused card — <kbd>y</kbd> confirms, <kbd>esc</kbd> / <kbd>n</kbd> cancels |
 | <kbd>esc</kbd> | Close the preview, or cancel a delete |
+| <kbd>ctrl+f</kbd> | Show only sessions captured in the folder you launched from, and back |
 | <kbd>ctrl+r</kbd> | Re-read the vault, keeping whatever you've typed in the filter |
 | <kbd>ctrl+c</kbd> / <kbd>ctrl+q</kbd> | Quit — press twice within 2s |
 
@@ -70,6 +71,27 @@ Rewind stops listing it but the file — and the resume command inside it —
 survives. Trashed captures are kept for 14 days from deletion, then erased at
 the next launch; a toast reports every purge. Set `REWIND_TRASH_DAYS` to
 change the window, or to `0` to keep trash forever.
+
+### Only this folder
+
+The vault is global on purpose — finding "that thing I did in some other repo"
+is half the point. When you'd rather not see the other repos, <kbd>ctrl+f</kbd>
+(or the button in the toolbar) narrows the grid to cards captured in the
+directory you launched Rewind from. The button's label is the state:
+`○ all folders` or `◉ only here`.
+
+It's an extra condition, not a mode — the text filter keeps working alongside
+it, broken cards stay visible either way, and if it leaves the grid empty
+Rewind says so instead of just showing nothing.
+
+The match is exact, so launching from a subdirectory of a captured folder
+matches nothing. Symlinked spellings of the same folder (`/tmp` vs
+`/private/tmp`) do match.
+
+The ⚙ button sets whether the toggle *starts* on, saved per-vault in
+`settings.json`. That's a starting state, not a lock: you can still flip the
+toggle either way for the rest of the session. If `settings.json` is missing or
+unreadable, Rewind starts showing everything.
 
 ### Preview
 
