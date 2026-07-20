@@ -4,11 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from textual.widgets import Input, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, Static
 
 from conftest import write_capture
 from rewind.app import ConfirmDeleteScreen, PreviewScreen, SessionCard, VaultApp, reflow
-from rewind.vault import SECONDS_PER_DAY
+from rewind.vault import SECONDS_PER_DAY, save_scope_default
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -498,3 +498,393 @@ async def test_deleting_the_last_session_restores_the_empty_state(tmp_path):
 
         assert len(app.query(SessionCard)) == 0
         assert len(app.query("#empty")) == 1
+
+
+# Fixed, synthetic launch dirs rather than tmp_path: a session's cwd is part of
+# its search_text, and a random pytest temp path fuzzy-matches almost any query
+# — which would make the scope-plus-query test pass or fail on the roll of a
+# temp directory name. realpath normalizes these fine without them existing.
+HERE = "/proj/here"
+THERE = "/proj/elsewhere"
+
+
+def _scoped_vault(vault_dir: Path) -> Path:
+    """A vault holding one card captured in HERE, one in THERE, and one broken."""
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    write_capture(vault_dir, "here.md", "captured here", cwd=HERE)
+    write_capture(vault_dir, "elsewhere.md", "captured elsewhere", cwd=THERE)
+    (vault_dir / "broken.md").write_text("---\nharness: claude-code\n---\nno keys\n")
+    return vault_dir
+
+
+def _visible_titles(app: VaultApp) -> set[str]:
+    return {
+        c.session.title
+        for c in app.query(SessionCard)
+        if c.display and not c.session.error
+    }
+
+
+@pytest.mark.asyncio
+async def test_scope_hides_cards_from_other_folders(tmp_path):
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert _visible_titles(app) == {"captured here", "captured elsewhere"}
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert _visible_titles(app) == {"captured here"}
+
+
+@pytest.mark.asyncio
+async def test_broken_cards_survive_the_scope_filter(tmp_path):
+    # load_session leaves cwd="" on a parse failure, so an exact cwd match would
+    # hide every broken card — the one thing H4 forbids.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        broken = [c for c in app.query(SessionCard) if c.session.error]
+        assert len(broken) == 1
+        assert broken[0].display
+
+
+@pytest.mark.asyncio
+async def test_scope_and_text_query_apply_together(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_capture(tmp_path, "a.md", "alpha", cwd=HERE)
+    write_capture(tmp_path, "b.md", "beta", cwd=HERE)
+    write_capture(tmp_path, "c.md", "alpha", cwd=THERE)
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        app.query_one("#filter", Input).value = "alpha"
+        await pilot.pause()
+
+        # Scope drops the "alpha" in THERE; the query drops "beta" in HERE.
+        visible = [
+            c for c in app.query(SessionCard) if c.display and not c.session.error
+        ]
+        assert [(c.session.title, c.session.cwd) for c in visible] == [("alpha", HERE)]
+
+
+@pytest.mark.asyncio
+async def test_toggling_scope_off_restores_hidden_cards(tmp_path):
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        assert _visible_titles(app) == {"captured here"}
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert _visible_titles(app) == {"captured here", "captured elsewhere"}
+
+
+@pytest.mark.asyncio
+async def test_scope_matches_a_symlinked_spelling_of_the_launch_dir(tmp_path):
+    # The card holds the logical path the capture skill's `pwd` produced; the app
+    # holds the resolved one. Same folder, so it must still match. This one needs
+    # real directories, since only a real symlink exercises realpath.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write_capture(vault, "a.md", "via the symlink", cwd=str(link))
+
+    app = VaultApp(vault_dir=vault, launch_dir=str(real.resolve()))
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert _visible_titles(app) == {"via the symlink"}
+
+
+@pytest.mark.asyncio
+async def test_ctrl_f_toggles_scope_while_the_filter_has_focus(tmp_path):
+    # The whole reason the binding is modified: the filter Input owns plain
+    # letters, so `f` must stay a search and only ctrl+f may toggle.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert app.focused is app.query_one("#filter", Input)
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        assert app.scope_cwd is True
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.query_one("#filter", Input).value == "f"
+        assert app.scope_cwd is True
+
+
+@pytest.mark.asyncio
+async def test_scope_button_label_reports_the_current_state(tmp_path):
+    # The label states the mode, not the action, so scope is readable without
+    # opening or pressing anything.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        button = app.query_one("#scope", Button)
+        assert "all folders" in str(button.label)
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert "only here" in str(button.label)
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_scope_button_toggles_scope(tmp_path):
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#scope")
+        await pilot.pause()
+
+        assert app.scope_cwd is True
+        assert _visible_titles(app) == {"captured here"}
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_scope_button_hands_focus_back_to_the_filter(tmp_path):
+    # A clicked Button keeps focus, which would leave every later keystroke
+    # swallowed by the button — the same dead-filter trap _reload guards
+    # against. ctrl+f never had this problem; only the mouse path did.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#scope")
+        await pilot.pause()
+
+        assert app.focused is app.query_one("#filter", Input)
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.query_one("#filter", Input).value == "f"
+
+
+@pytest.mark.asyncio
+async def test_dismissing_settings_hands_focus_back_to_the_filter(tmp_path):
+    # Both dismissal paths: Textual restores focus to whatever held it before
+    # push_screen, so the hand-back has to happen before the push — this test
+    # is what notices if that ordering ever breaks.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.focused is app.query_one("#filter", Input)
+
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        await pilot.click("#settings-save")
+        await pilot.pause()
+        assert app.focused is app.query_one("#filter", Input)
+
+
+@pytest.mark.asyncio
+async def test_empty_scope_result_explains_itself(tmp_path):
+    # A blank grid with nothing typed is indistinguishable from a broken app,
+    # so the notice names the folder and the way back out.
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_capture(tmp_path, "a.md", "elsewhere", cwd=THERE)
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        notice = app.query_one("#scope-notice", Static)
+        assert not notice.display
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert notice.display
+        rendered = str(notice.content)
+        assert HERE in rendered
+        assert "ctrl+f" in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_broken_card_does_not_suppress_the_scope_notice(tmp_path):
+    # Broken cards are exempt from scoping, so a stray broken card would
+    # otherwise count as "visible" and silence the notice exactly when the
+    # grid shows nothing but an error card — the reader's real sessions are
+    # just as hidden either way.
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_capture(tmp_path, "a.md", "elsewhere", cwd=THERE)
+    (tmp_path / "broken.md").write_text("---\nharness: claude-code\n---\nno keys\n")
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert app.query_one("#scope-notice", Static).display
+
+
+@pytest.mark.asyncio
+async def test_the_notice_clears_when_scope_is_turned_back_off(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_capture(tmp_path, "a.md", "elsewhere", cwd=THERE)
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        assert app.query_one("#scope-notice", Static).display
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert not app.query_one("#scope-notice", Static).display
+
+
+@pytest.mark.asyncio
+async def test_a_blank_grid_from_a_typed_query_stays_unexplained(tmp_path):
+    # Existing behaviour: the reader typed it, so they know why.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        app.query_one("#filter", Input).value = "zzzznomatch"
+        await pilot.pause()
+
+        assert not app.query_one("#scope-notice", Static).display
+
+
+@pytest.mark.asyncio
+async def test_an_empty_vault_is_not_blamed_on_the_scope_filter(tmp_path):
+    save_scope_default(tmp_path, True)
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert len(app.query("#empty")) == 1
+        assert not app.query_one("#scope-notice", Static).display
+
+
+@pytest.mark.asyncio
+async def test_settings_save_persists_the_startup_default(tmp_path):
+    vault = _scoped_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        # The modal is a separate screen, so it is queried through app.screen —
+        # app.query_one stays bound to the screen underneath.
+        app.screen.query_one("#settings-scope", Checkbox).value = True
+        await pilot.click("#settings-save")
+        await pilot.pause()
+
+    assert json.loads((vault / "settings.json").read_text()) == {"scope_cwd": True}
+
+    # A fresh instance starts with the toggle in that state.
+    reopened = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with reopened.run_test():
+        assert reopened.scope_cwd is True
+        assert _visible_titles(reopened) == {"captured here"}
+
+
+@pytest.mark.asyncio
+async def test_settings_cancel_leaves_the_stored_default_alone(tmp_path):
+    vault = _scoped_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        app.screen.query_one("#settings-scope", Checkbox).value = True
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not (vault / "settings.json").exists()
+        assert app.scope_default is False
+
+
+@pytest.mark.asyncio
+async def test_saving_settings_does_not_move_the_live_toggle(tmp_path):
+    # The dialog sets the startup default only; making live scope jump from a
+    # settings dialog would change the screen for a reason nobody asked for.
+    vault = _scoped_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert app.scope_cwd is False
+
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        app.screen.query_one("#settings-scope", Checkbox).value = True
+        await pilot.click("#settings-save")
+        await pilot.pause()
+
+        assert app.scope_default is True
+        assert app.scope_cwd is False
+        assert _visible_titles(app) == {"captured here", "captured elsewhere"}
+
+
+@pytest.mark.asyncio
+async def test_the_toggle_can_still_be_turned_off_when_the_setting_is_on(tmp_path):
+    # The setting is an initial state, not a mode and not a lock.
+    vault = _scoped_vault(tmp_path / "vault")
+    save_scope_default(vault, True)
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert app.scope_cwd is True
+
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        assert _visible_titles(app) == {"captured here", "captured elsewhere"}
+
+
+@pytest.mark.asyncio
+async def test_corrupt_settings_start_with_the_vault_fully_visible(tmp_path):
+    vault = _scoped_vault(tmp_path / "vault")
+    (vault / "settings.json").write_text("{broken")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test():
+        assert app.scope_cwd is False
+        assert _visible_titles(app) == {"captured here", "captured elsewhere"}
+
+
+@pytest.mark.asyncio
+async def test_the_filter_keeps_focus_after_a_reload(tmp_path):
+    # Adding focusable buttons must not disturb the invariant the TUI is built
+    # around: the filter Input holds focus from launch and after every rebuild.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert app.focused is app.query_one("#filter", Input)
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert app.focused is app.query_one("#filter", Input)
+
+
+@pytest.mark.asyncio
+async def test_scope_survives_a_reload(tmp_path):
+    # _reload rebuilds every card with display defaulting to True, so scope has
+    # to be re-applied for the same reason the text filter is.
+    app = VaultApp(vault_dir=_scoped_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert _visible_titles(app) == {"captured here"}
+
+
+@pytest.mark.asyncio
+async def test_the_dialog_shows_the_stored_default_not_the_live_toggle(tmp_path):
+    # The checkbox edits the startup default, so it must show that — even when
+    # the live toggle has since been flipped the other way.
+    vault = _scoped_vault(tmp_path / "vault")
+    save_scope_default(vault, True)
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        assert app.scope_cwd is False
+
+        await pilot.click("#settings-open")
+        await pilot.pause()
+
+        assert app.screen.query_one("#settings-scope", Checkbox).value is True

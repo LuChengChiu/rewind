@@ -9,6 +9,7 @@ shown loudly in the TUI, never silently dropped.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -65,6 +66,65 @@ def resolve_trash_days() -> int | None:
     except ValueError:
         return None
     return days if days > 0 else None
+
+
+SETTINGS_FILENAME = "settings.json"
+
+
+def load_scope_default(vault_dir: Path) -> bool:
+    """Whether the scope toggle should start on, per the vault's `settings.json`.
+
+    Lives in the vault dir rather than a home-wide config path because the
+    setting narrows *this* vault's cards, so it travels with the vault when
+    `$REWIND_DIR` points elsewhere. `load_vault` globs `*.md`, so the file can
+    never be mistaken for a card.
+
+    Every failure — missing file, bad JSON, wrong shape, unreadable — returns
+    False, i.e. show everything. This is a preference, not data: Rewind must
+    open and show cards whatever state this file is in, and the failure
+    direction is "show more", never "show nothing".
+    """
+    try:
+        raw = json.loads((vault_dir / SETTINGS_FILENAME).read_text())
+        return bool(raw["scope_cwd"])
+    except Exception:  # noqa: BLE001 — see docstring: nothing here may block launch
+        return False
+
+
+def save_scope_default(vault_dir: Path, scope_cwd: bool) -> None:
+    """Persist the scope toggle's startup state, rewriting the whole file.
+
+    A whole-file rewrite is fine while `settings.json` carries one key, and
+    that is the documented ceiling — merge on write as soon as a second key
+    appears, or saving scope would silently drop it.
+    """
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / SETTINGS_FILENAME).write_text(
+        json.dumps({"scope_cwd": scope_cwd}) + "\n"
+    )
+
+
+def same_dir(a: str, b: str) -> bool:
+    """Whether two path strings name the same directory.
+
+    Exact match, not prefix and not fuzzy: `is_relative_to` would make
+    launching from `~` show everything, and the fuzzy text matcher would let a
+    folder named `web` match `cms-web-saku`.
+
+    Both sides go through `realpath` because the two ends disagree on spelling.
+    The capture skill fills `cwd` from shell `pwd` — the *logical* path — while
+    the TUI reads `Path.cwd()`, which resolves symlinks; on macOS `/tmp` vs
+    `/private/tmp` is the everyday case. Resolving both makes "the same folder"
+    match whichever way it was reached, and also drops trailing slashes.
+
+    An empty string is never a match. `realpath("")` returns the process cwd,
+    so without this guard every broken card (`cwd=""` after a parse failure)
+    would match the launch dir by accident rather than by the deliberate
+    exemption the caller applies.
+    """
+    if not a or not b:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
 
 
 def purge_trash(
