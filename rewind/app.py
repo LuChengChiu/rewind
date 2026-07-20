@@ -11,9 +11,12 @@ erases it for good (see `VaultApp._purge_trash`).
 
 The vault stays global — finding "that thing I did in some other repo" is half
 the point — so ctrl+f narrows the grid to cards captured in the launch
-directory instead (see `VaultApp.action_toggle_scope`). The ⚙ dialog sets only
-what that toggle *starts* as, persisted per-vault in `settings.json`; it is an
-initial state, never a mode or a lock.
+directory instead (see `VaultApp.action_toggle_scope`). ctrl+s (or the toolbar
+button) picks the order the cards are laid out in, re-sorting what is already
+loaded rather than re-reading the vault (see `VaultApp._resort`).
+
+The ⚙ dialog sets only what those two *start* as, persisted per-vault in
+`settings.json`; they are initial states, never modes or locks.
 """
 
 from __future__ import annotations
@@ -31,14 +34,17 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, Static
+from textual.widgets.option_list import Option
 
 from .theme import BITCOIN_DEFI, PALETTE
 from .transcript import TranscriptError, read_transcript, supports_preview
 from .update import maybe_update_in_background
 from .vault import (
+    SORT_MODES,
     Session,
-    load_scope_default,
+    Settings,
+    load_settings,
     load_vault,
     matches,
     purge_trash,
@@ -46,7 +52,8 @@ from .vault import (
     resolve_trash_days,
     resolve_vault_dir,
     same_dir,
-    save_scope_default,
+    save_settings,
+    sort_sessions,
     trash_session,
 )
 
@@ -249,21 +256,84 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class SettingsScreen(ModalScreen[bool | None]):
-    """Sets the scope toggle's *startup* state — nothing else.
+def _sort_options(marked: str) -> list[Option]:
+    """The picker's rows, with `●` on *marked* only.
 
-    Dismisses with the new default on Save, or None on any cancel, so the
-    caller can tell "saved False" from "did not save". The dialog deliberately
-    never touches the current session's toggle: making live scope jump from a
-    settings dialog would change what is on screen for a reason the reader did
-    not ask for. The setting is an initial state, not a mode and not a lock.
+    Shared by both pickers so they read as one feature: single-line rows, a
+    dim `—`-separated description, and a marker on exactly one row. The
+    unmarked rows get a space in the marker's place rather than nothing, so
+    the mode names stay in one column.
+    """
+    return [
+        Option(
+            f"{'●' if mode == marked else ' '} {mode}  [dim]— {description}[/dim]",
+            id=mode,
+        )
+        for mode, description in SORT_MODES.items()
+    ]
+
+
+def _sort_index(sort_mode: str) -> int:
+    """The row *sort_mode* sits on — both pickers list `SORT_MODES` in order."""
+    return list(SORT_MODES).index(sort_mode)
+
+
+class SortScreen(ModalScreen[str | None]):
+    """Picks the live sort order, applying it on selection.
+
+    Dismisses with the chosen mode, or None on esc — so opening the picker
+    just to read what "grouped" means costs nothing. The cursor starts on the
+    active mode, so the highlighted row and the marked row agree on open.
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(self, scope_default: bool) -> None:
+    def __init__(self, sort_mode: str) -> None:
+        super().__init__()
+        self.sort_mode = sort_mode
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sort"):
+            yield Label("Sort", id="sort-title")
+            yield OptionList(*_sort_options(self.sort_mode), id="sort-options")
+            yield Label("[dim]esc close[/dim]", id="sort-hint")
+
+    def on_mount(self) -> None:
+        options = self.query_one("#sort-options", OptionList)
+        options.highlighted = _sort_index(self.sort_mode)
+        options.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Both enter and a click arrive here, so the mouse path that opened the
+        # dialog can also finish the job. Every row carries a mode as its id;
+        # the guard only satisfies the `str | None` typing, and falls back to
+        # "no change" rather than to any particular mode.
+        self.dismiss(event.option.id or self.sort_mode)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SettingsScreen(ModalScreen[Settings | None]):
+    """Sets what a fresh launch *starts* in — nothing else.
+
+    Dismisses with the new defaults on Save, or None on any cancel, so the
+    caller can tell "saved" from "did not save". The dialog deliberately never
+    touches the current session's toggle or sort: making either jump from a
+    settings dialog would change what is on screen for a reason the reader did
+    not ask for. These are initial states, not modes and not locks.
+
+    The sort row looks exactly like the live picker but commits differently:
+    selecting only moves the pending marker, and the write happens on Save —
+    the stage-then-commit contract the checkbox beside it already follows.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, scope_default: bool, sort_default: str) -> None:
         super().__init__()
         self.scope_default = scope_default
+        self.sort_default = sort_default
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settings"):
@@ -273,13 +343,34 @@ class SettingsScreen(ModalScreen[bool | None]):
                 value=self.scope_default,
                 id="settings-scope",
             )
+            yield Label("Start sorted by", id="settings-sort-label")
+            yield OptionList(*_sort_options(self.sort_default), id="settings-sort")
             with Horizontal(id="settings-buttons"):
                 yield Button("Save", id="settings-save", variant="primary")
                 yield Button("Cancel", id="settings-cancel")
 
+    def on_mount(self) -> None:
+        self.query_one("#settings-sort", OptionList).highlighted = _sort_index(
+            self.sort_default
+        )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Staged, not applied: only the marker moves. Save writes it, Cancel
+        # discards it. The `or` mirrors SortScreen's: id-less rows cannot
+        # exist, and the fallback is "keep the pending choice".
+        self.sort_default = event.option.id or self.sort_default
+        options = self.query_one("#settings-sort", OptionList)
+        for option in _sort_options(self.sort_default):
+            options.replace_option_prompt(option.id, option.prompt)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "settings-save":
-            self.dismiss(self.query_one("#settings-scope", Checkbox).value)
+            self.dismiss(
+                Settings(
+                    scope_cwd=self.query_one("#settings-scope", Checkbox).value,
+                    sort=self.sort_default,
+                )
+            )
         else:
             self.dismiss(None)
 
@@ -417,6 +508,9 @@ class VaultApp(App):
         Binding("ctrl+q", "quit_with_toast", "Quit", priority=True),
         Binding("ctrl+r", "reload", "Reload", priority=True),
         Binding("ctrl+f", "toggle_scope", "Scope", priority=True),
+        # Safe as a binding because the terminal driver disables XON/XOFF flow
+        # control, so ctrl+s never reaches us as "freeze the terminal".
+        Binding("ctrl+s", "open_sort", "Sort", priority=True),
     ]
 
     CSS = """
@@ -433,7 +527,7 @@ class VaultApp(App):
            thing in the row at any terminal width. */
         width: 1fr;
     }
-    #scope, #settings-open {
+    #sort-open, #scope, #settings-open {
         min-width: 0;
         height: 3;
         margin-left: 1;
@@ -545,6 +639,26 @@ class VaultApp(App):
         width: 100%;
         margin-top: 1;
     }
+    SortScreen {
+        align: center middle;
+    }
+    #sort {
+        width: 50;
+        max-width: 90%;
+        height: auto;
+        background: $surface;
+        border: round $accent;
+        padding: 1 2;
+    }
+    #sort-title {
+        width: 100%;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #sort-hint {
+        width: 100%;
+        margin-top: 1;
+    }
     SettingsScreen {
         align: center middle;
     }
@@ -560,6 +674,19 @@ class VaultApp(App):
         width: 100%;
         text-style: bold;
         margin-bottom: 1;
+    }
+    #settings-sort-label {
+        width: 100%;
+        margin-top: 1;
+    }
+    /* Both pickers: the rows are the content, so the list sizes to them and
+       drops the border an OptionList draws by default — inside a dialog that
+       would be a second frame within the dialog's own. */
+    #sort-options, #settings-sort {
+        height: auto;
+        border: none;
+        background: $surface;
+        padding: 0;
     }
     #settings-buttons {
         height: auto;
@@ -632,16 +759,21 @@ class VaultApp(App):
         # `_reload` — see the comment there for why it is not computed per
         # filter pass.
         self._scoped_paths: set[Path] = set()
-        # Two separate pieces of state on purpose. `scope_default` is what
-        # settings.json holds and what the dialog edits; `scope_cwd` is the live
-        # toggle, seeded from it at startup and free to diverge for the rest of
-        # the session. Collapsing them would turn the setting into a lock.
-        self.scope_default = load_scope_default(self.vault_dir)
+        # Two separate pieces of state per setting, on purpose. The `*_default`
+        # halves are what settings.json holds and what the ⚙ dialog edits; the
+        # live halves are seeded from them at startup and free to diverge for
+        # the rest of the session. Collapsing them would turn the settings into
+        # locks — and would make a temporary reorder accidentally permanent.
+        settings = load_settings(self.vault_dir)
+        self.scope_default = settings.scope_cwd
         self.scope_cwd = self.scope_default
+        self.sort_default = settings.sort
+        self.sort_mode = self.sort_default
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="toolbar"):
             yield Input(placeholder="type to filter…", id="filter")
+            yield Button(self._sort_label(), id="sort-open")
             yield Button(self._scope_label(), id="scope")
             yield Button("⚙", id="settings-open")
         # Outside #cards, which is a grid: a notice mounted in there would be
@@ -656,6 +788,14 @@ class VaultApp(App):
         is visible without opening or pressing anything.
         """
         return "◉ only here" if self.scope_cwd else "○ all folders"
+
+    def _sort_label(self) -> str:
+        """The sort button's text, which is also how the order is read.
+
+        Spells out the active mode rather than showing an icon, matching the
+        scope button beside it: a glyph cannot say which of three orders is on.
+        """
+        return f"sort: {self.sort_mode}"
 
     async def on_mount(self) -> None:
         self.register_theme(BITCOIN_DEFI)
@@ -701,7 +841,7 @@ class VaultApp(App):
         is re-applied below; skipping that would leave a stale query showing
         every freshly mounted card.
         """
-        self.sessions = load_vault(self.vault_dir)
+        self.sessions = load_vault(self.vault_dir, self.sort_mode)
         # Scope membership is settled here, not in `_apply_filter`: a card's
         # cwd can only change through a reload and the launch dir never
         # changes, so resolving it per keystroke would realpath — an lstat per
@@ -710,6 +850,16 @@ class VaultApp(App):
         self._scoped_paths = {
             s.path for s in self.sessions if same_dir(s.cwd, self.launch_dir)
         }
+        await self._rebuild_grid()
+
+    async def _rebuild_grid(self) -> None:
+        """Re-mount the card grid from `self.sessions`, then restore the view.
+
+        Split out of `_reload` so the sort path can share it: order is mount
+        order, so changing the sort has to re-mount, and it needs exactly the
+        same post-conditions — filter re-applied, focus back on the filter,
+        empty state intact. One rebuild path means neither can drift.
+        """
         cards = self.query_one("#cards", VerticalScroll)
         await cards.remove_children()
         if self.sessions:
@@ -758,6 +908,36 @@ class VaultApp(App):
             return
         await self._reload()
         self.notify(f"Moved to {target.parent}", title="Deleted")
+
+    def action_open_sort(self) -> None:
+        """Open the live sort picker.
+
+        Unconditional, including on an empty vault: a key that silently does
+        nothing under some conditions reads as broken. Focus goes back to the
+        filter *before* the push for the same reason as the ⚙ dialog — Textual
+        restores focus to whatever held it before push_screen.
+        """
+        self.query_one("#filter", Input).focus()
+        self.push_screen(SortScreen(self.sort_mode), self._sort_picked)
+
+    def _sort_picked(self, sort_mode: str | None) -> None:
+        """Apply a pick from the live picker; None (esc) changes nothing."""
+        if sort_mode is None:
+            return
+        self.run_worker(self._resort(sort_mode))
+
+    async def _resort(self, sort_mode: str) -> None:
+        """Re-order the loaded sessions in place and rebuild the grid.
+
+        Deliberately does not touch the disk in either direction: it re-sorts
+        the list already in memory, so a sort change never doubles as a
+        surprise sync, and it leaves the stored default alone, so a temporary
+        reorder is never accidentally permanent.
+        """
+        self.sort_mode = sort_mode
+        self.query_one("#sort-open", Button).label = self._sort_label()
+        self.sessions = sort_sessions(self.sessions, sort_mode)
+        await self._rebuild_grid()
 
     async def action_reload(self) -> None:
         await self._reload()
@@ -834,21 +1014,28 @@ class VaultApp(App):
         if event.button.id == "scope":
             self.action_toggle_scope()
             self.query_one("#filter", Input).focus()
+        elif event.button.id == "sort-open":
+            self.action_open_sort()
         elif event.button.id == "settings-open":
             self.query_one("#filter", Input).focus()
-            self.push_screen(SettingsScreen(self.scope_default), self._save_settings)
+            self.push_screen(
+                SettingsScreen(self.scope_default, self.sort_default),
+                self._save_settings,
+            )
 
-    def _save_settings(self, scope_default: bool | None) -> None:
-        """Write the new startup default, if the dialog was saved rather than cancelled.
+    def _save_settings(self, defaults: Settings | None) -> None:
+        """Write the new startup defaults, if the dialog was saved rather than cancelled.
 
-        None means cancel, so the stored setting is left untouched. Note this
-        never touches `self.scope_cwd`: the dialog sets what the toggle starts
-        as next launch, not what it is right now.
+        None means cancel, so the stored settings are left untouched. Note this
+        never touches `self.scope_cwd` or `self.sort_mode`: the dialog sets what
+        those start as next launch, not what they are right now.
         """
-        if scope_default is None:
+        if defaults is None:
             return
         try:
-            save_scope_default(self.vault_dir, scope_default)
+            save_settings(
+                self.vault_dir, scope_cwd=defaults.scope_cwd, sort=defaults.sort
+            )
         except OSError as exc:
             # H4: a write that did not happen must say so, rather than let the
             # reader believe the preference stuck.
@@ -858,9 +1045,14 @@ class VaultApp(App):
                 title="Not saved",
             )
             return
-        self.scope_default = scope_default
-        state = "on" if scope_default else "off"
-        self.notify(f'Rewind will start with "only here" {state}', title="Settings")
+        self.scope_default = defaults.scope_cwd
+        self.sort_default = defaults.sort
+        state = "on" if self.scope_default else "off"
+        self.notify(
+            f'Rewind will start with "only here" {state}, sorted by '
+            f"{self.sort_default}",
+            title="Settings",
+        )
 
     _quit_pending = False
 

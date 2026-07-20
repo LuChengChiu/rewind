@@ -4,11 +4,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from textual.widgets import Button, Checkbox, Input, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, Static
 
 from conftest import write_capture
-from rewind.app import ConfirmDeleteScreen, PreviewScreen, SessionCard, VaultApp, reflow
-from rewind.vault import SECONDS_PER_DAY, save_scope_default
+from rewind.app import (
+    ConfirmDeleteScreen,
+    PreviewScreen,
+    SessionCard,
+    SortScreen,
+    VaultApp,
+    reflow,
+)
+from rewind.vault import SECONDS_PER_DAY, SORT_MODES, save_settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -752,7 +759,7 @@ async def test_a_blank_grid_from_a_typed_query_stays_unexplained(tmp_path):
 
 @pytest.mark.asyncio
 async def test_an_empty_vault_is_not_blamed_on_the_scope_filter(tmp_path):
-    save_scope_default(tmp_path, True)
+    save_settings(tmp_path, scope_cwd=True)
     app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -774,7 +781,10 @@ async def test_settings_save_persists_the_startup_default(tmp_path):
         await pilot.click("#settings-save")
         await pilot.pause()
 
-    assert json.loads((vault / "settings.json").read_text()) == {"scope_cwd": True}
+    assert json.loads((vault / "settings.json").read_text()) == {
+        "scope_cwd": True,
+        "sort": "recent",
+    }
 
     # A fresh instance starts with the toggle in that state.
     reopened = VaultApp(vault_dir=vault, launch_dir=HERE)
@@ -822,7 +832,7 @@ async def test_saving_settings_does_not_move_the_live_toggle(tmp_path):
 async def test_the_toggle_can_still_be_turned_off_when_the_setting_is_on(tmp_path):
     # The setting is an initial state, not a mode and not a lock.
     vault = _scoped_vault(tmp_path / "vault")
-    save_scope_default(vault, True)
+    save_settings(vault, scope_cwd=True)
     app = VaultApp(vault_dir=vault, launch_dir=HERE)
     async with app.run_test() as pilot:
         assert app.scope_cwd is True
@@ -877,7 +887,7 @@ async def test_the_dialog_shows_the_stored_default_not_the_live_toggle(tmp_path)
     # The checkbox edits the startup default, so it must show that — even when
     # the live toggle has since been flipped the other way.
     vault = _scoped_vault(tmp_path / "vault")
-    save_scope_default(vault, True)
+    save_settings(vault, scope_cwd=True)
     app = VaultApp(vault_dir=vault, launch_dir=HERE)
     async with app.run_test() as pilot:
         await pilot.press("ctrl+f")
@@ -888,3 +898,411 @@ async def test_the_dialog_shows_the_stored_default_not_the_live_toggle(tmp_path)
         await pilot.pause()
 
         assert app.screen.query_one("#settings-scope", Checkbox).value is True
+
+
+# ---- sort ------------------------------------------------------------------
+#
+# One vault whose three orders are all different, so no assertion below can
+# pass by accident: strictly by time the two folders interleave, which is
+# exactly what grouped must undo.
+#
+#   recent   alpha 1, beta 1, alpha 2, beta 2
+#   oldest   beta 2, alpha 2, beta 1, alpha 1
+#   grouped  alpha 1, alpha 2, beta 1, beta 2
+
+
+def _sorted_vault(vault_dir: Path) -> Path:
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    for name, title, cwd, hour in [
+        ("a1.md", "alpha 1", HERE, 4),
+        ("b1.md", "beta 1", THERE, 3),
+        ("a2.md", "alpha 2", HERE, 2),
+        ("b2.md", "beta 2", THERE, 1),
+    ]:
+        write_capture(
+            vault_dir, name, title, cwd=cwd,
+            captured_at=f"2026-07-19T{hour:02d}:00:00+08:00",
+        )
+    return vault_dir
+
+
+def _card_order(app: VaultApp) -> list[str]:
+    """Visible healthy card titles, in the order they are laid out."""
+    return [
+        c.session.title
+        for c in app.query(SessionCard)
+        if c.display and not c.session.error
+    ]
+
+
+RECENT = ["alpha 1", "beta 1", "alpha 2", "beta 2"]
+OLDEST = ["beta 2", "alpha 2", "beta 1", "alpha 1"]
+GROUPED = ["alpha 1", "alpha 2", "beta 1", "beta 2"]
+
+
+async def _pick_sort(pilot, mode: str) -> None:
+    """Open the live picker and choose *mode*, applying it with enter.
+
+    Moves the cursor by assignment rather than counting arrow presses: the
+    cursor starts on the *active* mode, so a fixed number of downs would land
+    somewhere different depending on what is already selected. Arrow-key
+    navigation itself is covered separately, from a known starting position.
+    """
+    await pilot.press("ctrl+s")
+    await pilot.pause()
+    options = pilot.app.screen.query_one("#sort-options", OptionList)
+    options.highlighted = list(SORT_MODES).index(mode)
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+async def _stage_sort(pilot, app: VaultApp, mode: str) -> OptionList:
+    """Move the ⚙ dialog's pending sort marker to *mode*, returning its list.
+
+    The dialog opens with focus on the checkbox, so the list is focused first —
+    otherwise enter would be answered by the checkbox instead.
+    """
+    options = app.screen.query_one("#settings-sort", OptionList)
+    options.focus()
+    options.highlighted = list(SORT_MODES).index(mode)
+    await pilot.press("enter")
+    await pilot.pause()
+    return options
+
+
+@pytest.mark.asyncio
+async def test_the_vault_opens_newest_first(tmp_path):
+    # Today's behaviour, unchanged unless asked otherwise.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test():
+        assert _card_order(app) == RECENT
+        assert str(app.query_one("#sort-open", Button).label) == "sort: recent"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_s_opens_the_picker_while_the_filter_has_focus(tmp_path):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        assert app.focused is app.query_one("#filter", Input)
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SortScreen)
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_sort_button_opens_the_picker(tmp_path):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#sort-open")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SortScreen)
+
+
+@pytest.mark.asyncio
+async def test_the_picker_opens_on_an_empty_vault(tmp_path):
+    # A key that silently does nothing under some conditions reads as broken.
+    app = VaultApp(vault_dir=tmp_path, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SortScreen)
+
+
+@pytest.mark.asyncio
+async def test_only_the_active_mode_is_marked_and_the_cursor_starts_there(tmp_path):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, "grouped")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        options = app.screen.query_one("#sort-options", OptionList)
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(3)]
+        assert [p for p in prompts if p.startswith("●")] == [prompts[2]]
+        # The highlighted row and the marked row must agree on open.
+        assert options.highlighted == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,expected",
+    [("oldest", OLDEST), ("grouped", GROUPED), ("recent", RECENT)],
+)
+async def test_picking_a_mode_reorders_the_grid(tmp_path, mode, expected):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, mode)
+
+        assert _card_order(app) == expected
+        assert str(app.query_one("#sort-open", Button).label) == f"sort: {mode}"
+        # Applied and dismissed in one keystroke.
+        assert not isinstance(app.screen, SortScreen)
+
+
+@pytest.mark.asyncio
+async def test_arrow_keys_and_enter_pick_a_mode(tmp_path):
+    # From the default, the cursor starts on recent, so one down lands on
+    # oldest and enter applies it — no mouse, one keystroke to commit.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert _card_order(app) == OLDEST
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_row_picks_that_mode(tmp_path):
+    # The mouse path that opened the dialog can also finish the job.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#sort-open")
+        await pilot.pause()
+        # Row 1 of the list: oldest.
+        await pilot.click("#sort-options", offset=(2, 1))
+        await pilot.pause()
+
+        assert _card_order(app) == OLDEST
+
+
+@pytest.mark.asyncio
+async def test_escape_leaves_the_order_alone(tmp_path):
+    # Opening the picker just to read what the modes mean is free.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert _card_order(app) == RECENT
+        assert str(app.query_one("#sort-open", Button).label) == "sort: recent"
+
+
+@pytest.mark.asyncio
+async def test_sorting_keeps_the_typed_filter_applied(tmp_path):
+    # Narrow to a project, then reorder what is left.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        app.query_one("#filter", Input).value = "alpha"
+        await pilot.pause()
+        assert _card_order(app) == ["alpha 1", "alpha 2"]
+
+        await _pick_sort(pilot, "oldest")
+
+        assert _card_order(app) == ["alpha 2", "alpha 1"]
+        assert app.query_one("#filter", Input).value == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_sorting_respects_the_scope_toggle(tmp_path):
+    # "only here" plus an order compose instead of fighting.
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        await _pick_sort(pilot, "oldest")
+
+        assert _card_order(app) == ["alpha 2", "alpha 1"]
+
+
+@pytest.mark.asyncio
+async def test_sorting_returns_focus_to_the_filter(tmp_path):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, "grouped")
+
+        assert app.focused is app.query_one("#filter", Input)
+        await pilot.press("z")
+        await pilot.pause()
+        assert app.query_one("#filter", Input).value == "z"
+
+
+@pytest.mark.asyncio
+async def test_broken_cards_stay_visible_in_every_mode(tmp_path):
+    # H4 holds regardless of order.
+    vault = _sorted_vault(tmp_path)
+    (vault / "broken.md").write_text("---\nharness: claude-code\n---\nno keys\n")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        for mode in ("oldest", "grouped", "recent"):
+            await _pick_sort(pilot, mode)
+            broken = [c for c in app.query(SessionCard) if c.session.error]
+            assert len(broken) == 1, mode
+            assert broken[0].display, mode
+
+
+@pytest.mark.asyncio
+async def test_sorting_does_not_pick_up_new_files_from_disk(tmp_path):
+    # A sort change must never double as a surprise sync — ctrl+r stays the
+    # only way to re-read the vault.
+    vault = _sorted_vault(tmp_path)
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        write_capture(vault, "new.md", "captured later", cwd=HERE)
+
+        await _pick_sort(pilot, "oldest")
+
+        assert "captured later" not in _card_order(app)
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert "captured later" in _card_order(app)
+
+
+@pytest.mark.asyncio
+async def test_a_reload_keeps_the_live_sort(tmp_path):
+    app = VaultApp(vault_dir=_sorted_vault(tmp_path), launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, "grouped")
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        assert _card_order(app) == GROUPED
+
+
+@pytest.mark.asyncio
+async def test_the_live_sort_does_not_touch_the_stored_default(tmp_path):
+    # A temporary reorder is never accidentally permanent.
+    vault = _sorted_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, "grouped")
+
+        assert app.sort_default == "recent"
+        assert not (vault / "settings.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_settings_save_persists_the_sort_default(tmp_path):
+    vault = _sorted_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        await _stage_sort(pilot, app, "grouped")
+        await pilot.click("#settings-save")
+        await pilot.pause()
+
+    assert json.loads((vault / "settings.json").read_text()) == {
+        "scope_cwd": False,
+        "sort": "grouped",
+    }
+
+    # A fresh launch opens in the stored order.
+    reopened = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with reopened.run_test():
+        assert _card_order(reopened) == GROUPED
+        assert str(reopened.query_one("#sort-open", Button).label) == "sort: grouped"
+
+
+@pytest.mark.asyncio
+async def test_picking_a_sort_in_settings_changes_nothing_until_save(tmp_path):
+    # Stage-then-commit: only the pending marker moves.
+    vault = _sorted_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        options = await _stage_sort(pilot, app, "oldest")
+
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(3)]
+        assert [p for p in prompts if p.startswith("●")] == [prompts[1]]
+        # Nothing behind the dialog has moved, and nothing is on disk yet.
+        assert app.sort_mode == "recent"
+        assert _card_order(app) == RECENT
+        assert not (vault / "settings.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_settings_cancel_discards_the_pending_sort(tmp_path):
+    vault = _sorted_vault(tmp_path / "vault")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        await _stage_sort(pilot, app, "grouped")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not (vault / "settings.json").exists()
+        assert app.sort_default == "recent"
+        assert _card_order(app) == RECENT
+
+
+@pytest.mark.asyncio
+async def test_saving_the_sort_default_preserves_the_scope_default(tmp_path):
+    # One setting must never silently erase another.
+    vault = _sorted_vault(tmp_path / "vault")
+    save_settings(vault, scope_cwd=True)
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await pilot.click("#settings-open")
+        await pilot.pause()
+        await _stage_sort(pilot, app, "oldest")
+        await pilot.click("#settings-save")
+        await pilot.pause()
+
+    assert json.loads((vault / "settings.json").read_text()) == {
+        "scope_cwd": True,
+        "sort": "oldest",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_settings_dialog_shows_the_stored_sort_not_the_live_one(tmp_path):
+    # The row edits the startup default, so it must show that — even when the
+    # live sort has since been changed to something else.
+    vault = _sorted_vault(tmp_path / "vault")
+    save_settings(vault, sort="grouped")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test() as pilot:
+        await _pick_sort(pilot, "oldest")
+        assert app.sort_mode == "oldest"
+
+        await pilot.click("#settings-open")
+        await pilot.pause()
+
+        options = app.screen.query_one("#settings-sort", OptionList)
+        assert str(options.get_option_at_index(2).prompt).startswith("●")
+        assert options.highlighted == 2
+
+
+@pytest.mark.asyncio
+async def test_a_seeded_settings_file_sets_the_opening_order(tmp_path):
+    vault = _sorted_vault(tmp_path / "vault")
+    save_settings(vault, sort="oldest")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test():
+        assert _card_order(app) == OLDEST
+
+
+@pytest.mark.asyncio
+async def test_corrupt_settings_open_in_recent(tmp_path):
+    # No state of that file may block the vault from opening.
+    vault = _sorted_vault(tmp_path / "vault")
+    (vault / "settings.json").write_text("{broken")
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test():
+        assert _card_order(app) == RECENT
+        assert str(app.query_one("#sort-open", Button).label) == "sort: recent"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_stored_sort_opens_in_recent(tmp_path):
+    vault = _sorted_vault(tmp_path / "vault")
+    (vault / "settings.json").write_text('{"sort": "sideways"}')
+    app = VaultApp(vault_dir=vault, launch_dir=HERE)
+    async with app.run_test():
+        assert _card_order(app) == RECENT

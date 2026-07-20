@@ -54,6 +54,7 @@ Type to filter, click the card you want, and its resume command
 | <kbd>d</kbd> | Delete the focused card — <kbd>y</kbd> confirms, <kbd>esc</kbd> / <kbd>n</kbd> cancels |
 | <kbd>esc</kbd> | Close the preview, or cancel a delete |
 | <kbd>ctrl+f</kbd> | Show only sessions captured in the folder you launched from, and back |
+| <kbd>ctrl+s</kbd> | Choose the order the cards are laid out in |
 | <kbd>ctrl+r</kbd> | Re-read the vault, keeping whatever you've typed in the filter |
 | <kbd>ctrl+c</kbd> / <kbd>ctrl+q</kbd> | Quit — press twice within 2s |
 
@@ -64,6 +65,33 @@ Cards are sorted newest-first and laid out in up to three columns depending on
 terminal width. A card that's malformed, missing fields, or from an unknown
 harness shows up in red with the reason — never silently dropped, and never
 hidden by the filter.
+
+### Sort
+
+<kbd>ctrl+s</kbd> — or the `sort: …` button, whose label is always the active
+mode — opens a picker with three orders:
+
+| Mode | Order |
+| --- | --- |
+| `recent` | Newest first. The default. |
+| `oldest` | Oldest first — for finding what's been rotting at the back of the vault. |
+| `grouped` | By capture folder: still recency-ordered, but a session drags its folder-siblings up alongside it instead of interleaving strictly by timestamp. |
+
+Buckets in `grouped` are ranked by their newest member, so the folder you most
+recently worked in leads; inside a bucket the freshest session is on top. The
+folder match is exact, the same keying as the <kbd>ctrl+f</kbd> scope: a
+subdirectory is its own bucket (which recency parks next to its parent
+anyway), but two spellings of one folder — a symlink like macOS's `/tmp` vs
+`/private/tmp` — land in one bucket.
+
+Sorting reorders what's already loaded; it never re-reads the vault, so it can
+never double as a surprise sync (<kbd>ctrl+r</kbd> stays the only way to pick
+up new captures). Your typed filter and the <kbd>ctrl+f</kbd> scope toggle both
+keep applying, and broken cards stay visible in every mode.
+
+The choice lasts for the session. To change what a fresh launch opens in, use
+the sort row in the ⚙ dialog — it's stored as `sort` in the vault's
+`settings.json`, beside the scope default, so it travels with the vault.
 
 Deleting never erases on the spot: the card moves into `.trash/` inside the
 vault (suffixed `-2`, `-3`, … on a name collision, never overwriting), where
@@ -89,9 +117,11 @@ matches nothing. Symlinked spellings of the same folder (`/tmp` vs
 `/private/tmp`) do match.
 
 The ⚙ button sets whether the toggle *starts* on, saved per-vault in
-`settings.json`. That's a starting state, not a lock: you can still flip the
-toggle either way for the rest of the session. If `settings.json` is missing or
-unreadable, Rewind starts showing everything.
+`settings.json` alongside the sort default. That's a starting state, not a
+lock: you can still flip the toggle either way for the rest of the session. If
+`settings.json` is missing, unreadable, or hand-edited into nonsense, Rewind
+falls back to showing everything, newest-first — no state of that file can stop
+the vault opening.
 
 ### Preview
 
