@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +24,15 @@ COMMAND_TEMPLATES: dict[str, str] = {
 }
 
 SECONDS_PER_DAY = 86400
+
+# mode -> the one-line description both pickers show. The order is the order
+# the pickers list them in, and the first is the default everywhere.
+SORT_MODES: dict[str, str] = {
+    "recent": "newest first",
+    "oldest": "oldest first",
+    "grouped": "by folder, newest folder first",
+}
+SORT_DEFAULT = "recent"
 
 
 def resolve_vault_dir() -> Path:
@@ -71,37 +80,69 @@ def resolve_trash_days() -> int | None:
 SETTINGS_FILENAME = "settings.json"
 
 
-def load_scope_default(vault_dir: Path) -> bool:
-    """Whether the scope toggle should start on, per the vault's `settings.json`.
+@dataclass(frozen=True)
+class Settings:
+    """What a fresh launch starts as — the two rows of the ⚙ dialog.
 
-    Lives in the vault dir rather than a home-wide config path because the
-    setting narrows *this* vault's cards, so it travels with the vault when
+    Field names match the keys in `settings.json`; the defaults here are the
+    fallbacks every missing or unusable key silently yields.
+    """
+
+    scope_cwd: bool = False
+    sort: str = SORT_DEFAULT
+
+
+def load_settings(vault_dir: Path) -> Settings:
+    """The vault's `settings.json`, with every missing or unusable key defaulted.
+
+    Lives in the vault dir rather than a home-wide config path because these
+    settings shape *this* vault's cards, so they travel with the vault when
     `$REWIND_DIR` points elsewhere. `load_vault` globs `*.md`, so the file can
     never be mistaken for a card.
 
-    Every failure — missing file, bad JSON, wrong shape, unreadable — returns
-    False, i.e. show everything. This is a preference, not data: Rewind must
-    open and show cards whatever state this file is in, and the failure
-    direction is "show more", never "show nothing".
+    Every failure — missing file, bad JSON, wrong shape, unreadable, a wrongly
+    typed value, an unknown sort mode — yields the default for that key. These
+    are preferences, not data: Rewind must open and show cards whatever state
+    this file is in, and the failure direction is "show more, in the usual
+    order", never "show nothing". Validation is per-key so one bad key does not
+    discard a good one.
     """
     try:
         raw = json.loads((vault_dir / SETTINGS_FILENAME).read_text())
-        return bool(raw["scope_cwd"])
+        stored = raw if isinstance(raw, dict) else {}
     except Exception:  # noqa: BLE001 — see docstring: nothing here may block launch
-        return False
-
-
-def save_scope_default(vault_dir: Path, scope_cwd: bool) -> None:
-    """Persist the scope toggle's startup state, rewriting the whole file.
-
-    A whole-file rewrite is fine while `settings.json` carries one key, and
-    that is the documented ceiling — merge on write as soon as a second key
-    appears, or saving scope would silently drop it.
-    """
-    vault_dir.mkdir(parents=True, exist_ok=True)
-    (vault_dir / SETTINGS_FILENAME).write_text(
-        json.dumps({"scope_cwd": scope_cwd}) + "\n"
+        return Settings()
+    scope_cwd = stored.get("scope_cwd")
+    sort = stored.get("sort")
+    return Settings(
+        scope_cwd=scope_cwd if isinstance(scope_cwd, bool) else Settings.scope_cwd,
+        sort=sort if sort in SORT_MODES else Settings.sort,
     )
+
+
+def save_settings(
+    vault_dir: Path,
+    *,
+    scope_cwd: bool | None = None,
+    sort: str | None = None,
+) -> None:
+    """Merge the given keys into the vault's `settings.json`; None leaves a key as stored.
+
+    Merge rather than whole-file rewrite: the file carries more than one key,
+    so writing only the key being edited would silently erase the others. The
+    base is `load_settings`, so a corrupt file is replaced by defaults plus the
+    update instead of propagating its corruption — the same "no state of this
+    file blocks anything" rule the loader follows. Named parameters, not
+    `**kwargs`: a typo'd key must be a TypeError here, never junk persisted
+    into the file.
+    """
+    stored = load_settings(vault_dir)
+    settings = Settings(
+        scope_cwd=stored.scope_cwd if scope_cwd is None else scope_cwd,
+        sort=stored.sort if sort is None else sort,
+    )
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / SETTINGS_FILENAME).write_text(json.dumps(asdict(settings)) + "\n")
 
 
 def same_dir(a: str, b: str) -> bool:
@@ -244,14 +285,83 @@ def load_session(path: Path) -> Session:
         return Session(path=path, error=f"{type(exc).__name__}: {exc}")
 
 
-def load_vault(directory: Path) -> list[Session]:
+EPOCH = datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _captured_key(session: Session) -> datetime:
+    """When a session was captured, with the epoch standing in for "unknown".
+
+    Broken cards get no special-casing: falling back to the epoch puts them at
+    the bottom in `recent` (which is what they already did), at the top in
+    `oldest`, and — paired with their empty cwd — in one trailing bucket in
+    `grouped`. They stay visible in every mode either way (H4).
+    """
+    return session.captured_at or EPOCH
+
+
+def _bucket_key(cwd: str) -> str:
+    """The folder a card's cwd names, spelled one way.
+
+    `realpath` for the same reason `same_dir` uses it: capture writes the
+    shell's logical path while symlinks resolve elsewhere, and on macOS
+    `/tmp` vs `/private/tmp` is the everyday case — two spellings of one
+    folder must land in one bucket, exactly as ctrl+f treats them as one.
+    And the same empty-string guard: `realpath("")` is the process cwd, so a
+    broken card (cwd="" after a parse failure) must keep its own key rather
+    than join whatever folder Rewind was launched from.
+    """
+    return os.path.realpath(cwd) if cwd else ""
+
+
+def sort_sessions(sessions: list[Session], sort_mode: str) -> list[Session]:
+    """Order sessions by *sort_mode*, returning a new list.
+
+    Never re-reads the vault, on purpose: the live sort re-orders the list
+    already in memory, so changing the order can never double as a surprise
+    vault sync (ctrl+r stays the only way to pick up new files). `grouped`
+    does let `realpath` stat paths to normalize their spelling — but it reads
+    no cards.
+
+    `grouped` buckets on exact cwd equality — the same keying as `same_dir`
+    and as Claude Code's own project storage — and ranks buckets by their
+    newest member, so the folder just captured in leads and drags its siblings
+    up with it. Exact match, not prefix: fusing two unrelated same-named
+    projects is worse than splitting one project's subdirectories, which
+    recency ranking parks next to each other anyway. An unknown mode falls
+    back to `recent` rather than raising — no value of a settings key may
+    block the vault from opening.
+    """
+    if sort_mode == "oldest":
+        return sorted(sessions, key=_captured_key)
+    if sort_mode == "grouped":
+        # Normalized once per distinct spelling, not per card: realpath stats.
+        bucket_of: dict[str, str] = {}
+        newest: dict[str, datetime] = {}
+        for session in sessions:
+            if session.cwd not in bucket_of:
+                bucket_of[session.cwd] = _bucket_key(session.cwd)
+            bucket = bucket_of[session.cwd]
+            captured = _captured_key(session)
+            if bucket not in newest or captured > newest[bucket]:
+                newest[bucket] = captured
+        # The bucket key sits in the sort key so buckets stay contiguous even
+        # when two folders share a newest timestamp; without it, equal-ranked
+        # buckets interleave.
+        return sorted(
+            sessions,
+            key=lambda s: (
+                newest[bucket_of[s.cwd]],
+                bucket_of[s.cwd],
+                _captured_key(s),
+            ),
+            reverse=True,
+        )
+    return sorted(sessions, key=_captured_key, reverse=True)
+
+
+def load_vault(directory: Path, sort_mode: str = SORT_DEFAULT) -> list[Session]:
     sessions = [load_session(p) for p in sorted(directory.glob("*.md"))]
-    epoch = datetime.fromtimestamp(0, tz=timezone.utc)
-    sessions.sort(
-        key=lambda s: s.captured_at or epoch,
-        reverse=True,
-    )
-    return sessions
+    return sort_sessions(sessions, sort_mode)
 
 
 def trash_session(session: Session, vault_dir: Path) -> Path:

@@ -1,13 +1,17 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from conftest import write_capture
 from rewind.vault import (
     SECONDS_PER_DAY,
+    Session,
+    Settings,
     fuzzy_match,
-    load_scope_default,
+    load_settings,
     load_vault,
     matches,
     purge_trash,
@@ -15,7 +19,8 @@ from rewind.vault import (
     resolve_trash_days,
     resolve_vault_dir,
     same_dir,
-    save_scope_default,
+    save_settings,
+    sort_sessions,
     trash_session,
 )
 
@@ -263,34 +268,195 @@ def test_same_dir_never_matches_an_empty_path(tmp_path):
     assert not same_dir(str(tmp_path), "")
 
 
-def test_scope_default_round_trips(tmp_path):
-    save_scope_default(tmp_path, True)
-    assert load_scope_default(tmp_path) is True
-    save_scope_default(tmp_path, False)
-    assert load_scope_default(tmp_path) is False
+def test_settings_round_trip(tmp_path):
+    save_settings(tmp_path, scope_cwd=True, sort="oldest")
+    assert load_settings(tmp_path) == Settings(scope_cwd=True, sort="oldest")
+    save_settings(tmp_path, scope_cwd=False, sort="recent")
+    assert load_settings(tmp_path) == Settings(scope_cwd=False, sort="recent")
 
 
-def test_scope_default_is_off_when_settings_are_missing(tmp_path):
-    assert load_scope_default(tmp_path) is False
+def test_saving_one_setting_preserves_the_other(tmp_path):
+    # The whole reason the single-key writer had to go: writing scope must not
+    # silently erase the sort default, or vice versa.
+    save_settings(tmp_path, sort="grouped")
+    save_settings(tmp_path, scope_cwd=True)
+    assert load_settings(tmp_path) == Settings(scope_cwd=True, sort="grouped")
+
+    save_settings(tmp_path, sort="oldest")
+    assert load_settings(tmp_path).scope_cwd is True
 
 
-def test_scope_default_is_off_when_settings_are_corrupt(tmp_path):
+def test_settings_default_when_the_file_is_missing(tmp_path):
+    assert load_settings(tmp_path) == Settings(scope_cwd=False, sort="recent")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json at all",
+        '["scope_cwd"]',
+        "null",
+        '{"scope_cwd": "yes", "sort": "sideways"}',
+        '{"sort": 7}',
+    ],
+)
+def test_every_corruption_shape_yields_defaults(tmp_path, content):
     # A preference must never be able to stop Rewind opening, and the failure
-    # direction is "show more" — never "show nothing".
-    (tmp_path / "settings.json").write_text("{not json at all")
-    assert load_scope_default(tmp_path) is False
+    # direction is "show more, in the usual order" — never "show nothing".
+    # That includes wrongly typed values: "yes" is not a scope default, it is
+    # a malformed one, and malformed yields the default — not a coercion.
+    (tmp_path / "settings.json").write_text(content)
+    assert load_settings(tmp_path) == Settings(scope_cwd=False, sort="recent")
 
 
-def test_scope_default_is_off_when_settings_have_the_wrong_shape(tmp_path):
-    (tmp_path / "settings.json").write_text('["scope_cwd"]')
-    assert load_scope_default(tmp_path) is False
+def test_one_bad_key_does_not_discard_a_good_one(tmp_path):
+    (tmp_path / "settings.json").write_text('{"scope_cwd": true, "sort": "sideways"}')
+    assert load_settings(tmp_path) == Settings(scope_cwd=True, sort="recent")
+
+
+def test_saving_over_a_corrupt_file_replaces_it(tmp_path):
+    (tmp_path / "settings.json").write_text("{broken")
+    save_settings(tmp_path, sort="oldest")
+    assert load_settings(tmp_path) == Settings(scope_cwd=False, sort="oldest")
 
 
 def test_settings_file_is_not_loaded_as_a_card(tmp_path):
     # load_vault globs *.md, so settings.json can never be mistaken for a
     # capture — which is why it is allowed to live in the vault dir at all.
-    save_scope_default(tmp_path, True)
+    save_settings(tmp_path, scope_cwd=True)
     write_capture(tmp_path, "a.md")
     sessions = load_vault(tmp_path)
     assert len(sessions) == 1
     assert sessions[0].error is None
+
+
+BASE = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+
+
+def _session(name: str, *, hours: float | None, cwd: str = "/proj/a") -> Session:
+    """A session identified by its title, captured *hours* after BASE.
+
+    hours=None fabricates a broken card: no timestamp, no cwd, exactly the
+    fallbacks `load_session` leaves behind after a parse failure.
+    """
+    if hours is None:
+        return Session(path=Path(f"{name}.md"), title=name, error="broken")
+    return Session(
+        path=Path(f"{name}.md"),
+        title=name,
+        cwd=cwd,
+        captured_at=BASE + timedelta(hours=hours),
+    )
+
+
+def _titles(sessions: list[Session]) -> list[str]:
+    return [s.title for s in sessions]
+
+
+def test_recent_sorts_newest_first():
+    sessions = [_session("old", hours=0), _session("new", hours=5)]
+    assert _titles(sort_sessions(sessions, "recent")) == ["new", "old"]
+
+
+def test_oldest_sorts_oldest_first():
+    sessions = [_session("new", hours=5), _session("old", hours=0)]
+    assert _titles(sort_sessions(sessions, "oldest")) == ["old", "new"]
+
+
+def test_an_unknown_mode_falls_back_to_recent():
+    # No value of a settings key may block the vault from opening.
+    sessions = [_session("old", hours=0), _session("new", hours=5)]
+    assert _titles(sort_sessions(sessions, "sideways")) == ["new", "old"]
+
+
+def test_grouped_pulls_a_folders_cards_together():
+    # Strictly by timestamp these would interleave a/b/a/b; grouped must not.
+    sessions = [
+        _session("a1", hours=4, cwd="/proj/a"),
+        _session("b1", hours=3, cwd="/proj/b"),
+        _session("a2", hours=2, cwd="/proj/a"),
+        _session("b2", hours=1, cwd="/proj/b"),
+    ]
+    assert _titles(sort_sessions(sessions, "grouped")) == ["a1", "a2", "b1", "b2"]
+
+
+def test_grouped_ranks_buckets_by_their_newest_member():
+    # /proj/b holds the single newest card, so its whole bucket leads even
+    # though /proj/a has more cards and an older-but-larger cluster.
+    sessions = [
+        _session("a1", hours=5, cwd="/proj/a"),
+        _session("a2", hours=4, cwd="/proj/a"),
+        _session("b1", hours=9, cwd="/proj/b"),
+        _session("b2", hours=1, cwd="/proj/b"),
+    ]
+    assert _titles(sort_sessions(sessions, "grouped")) == ["b1", "b2", "a1", "a2"]
+
+
+def test_grouped_keys_on_exact_cwd_not_prefix():
+    # A subdirectory is its own bucket: a wrong merge is worse than a wrong
+    # split, and recency ranking parks the two buckets adjacently anyway.
+    sessions = [
+        _session("parent", hours=2, cwd="/proj/a"),
+        _session("child", hours=1, cwd="/proj/a/sub"),
+    ]
+    ordered = sort_sessions(sessions, "grouped")
+    assert _titles(ordered) == ["parent", "child"]
+
+
+def test_grouped_merges_two_spellings_of_one_folder(tmp_path):
+    # Same folder, reached two ways: capture writes the shell's logical path,
+    # so a symlinked spelling (macOS's /tmp vs /private/tmp) must land in the
+    # bucket ctrl+f already treats as the same place — the `same_dir` keying.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    sessions = [
+        _session("via-real", hours=3, cwd=str(real)),
+        _session("elsewhere", hours=2, cwd=str(tmp_path / "other")),
+        _session("via-link", hours=1, cwd=str(link)),
+    ]
+    # One bucket: via-link rides up with via-real instead of trailing
+    # elsewhere in a bucket of its own.
+    assert _titles(sort_sessions(sessions, "grouped")) == [
+        "via-real",
+        "via-link",
+        "elsewhere",
+    ]
+
+
+def test_broken_cards_land_on_their_fallbacks_in_every_mode():
+    sessions = [
+        _session("good-old", hours=0),
+        _session("good-new", hours=5),
+        _session("broken", hours=None),
+    ]
+    # recent: bottom (unchanged from today). oldest: top. grouped: its own
+    # trailing bucket, since cwd="" and the epoch rank it last.
+    assert _titles(sort_sessions(sessions, "recent"))[-1] == "broken"
+    assert _titles(sort_sessions(sessions, "oldest"))[0] == "broken"
+    assert _titles(sort_sessions(sessions, "grouped"))[-1] == "broken"
+
+
+def test_sorting_never_drops_or_duplicates_a_card():
+    # H4 in the sort layer: every mode is a permutation, nothing else.
+    sessions = [
+        _session("a1", hours=4, cwd="/proj/a"),
+        _session("b1", hours=3, cwd="/proj/b"),
+        _session("broken", hours=None),
+    ]
+    for mode in ("recent", "oldest", "grouped", "nonsense"):
+        assert sorted(_titles(sort_sessions(sessions, mode))) == [
+            "a1",
+            "b1",
+            "broken",
+        ]
+
+
+def test_load_vault_applies_the_requested_sort(tmp_path):
+    write_capture(tmp_path, "a.md", "first")
+    write_capture(tmp_path, "b.md", "second")
+    # Same captured_at in both, so this asserts the mode is threaded through
+    # at all rather than any particular tie-break.
+    assert len(load_vault(tmp_path, "grouped")) == 2
+    assert len(load_vault(tmp_path, "oldest")) == 2
