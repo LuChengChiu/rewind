@@ -520,17 +520,43 @@ class VaultApp(App):
     #toolbar {
         dock: top;
         height: auto;
-        margin: 0 1;
+        /* Vertical margin only: top lifts the bar off the terminal edge, bottom
+           sets it apart from the cards. The horizontal inset is PADDING, not
+           margin, on purpose — a docked-top widget keeps its 100% width and a
+           horizontal *margin* just shoves the whole bar past the right edge,
+           clipping ⚙. Padding insets the content while the box stays on-screen,
+           and 0 1 keeps the left edge aligned with #cards' padding. */
+        margin: 1 0;
+        padding: 0 1;
     }
     #filter {
-        /* Takes whatever the two buttons leave, so the search stays the widest
-           thing in the row at any terminal width. */
+        /* Takes whatever the button group leaves, so the search stays the
+           widest thing in the row at any terminal width. */
         width: 1fr;
+        /* Override Input's default `tall` border: its left edge is a heavy ▊
+           block against hairline top/bottom edges, which reads as a broken
+           left border. `round` matches the house style every card and modal
+           already uses — muted when idle, accent on focus, like the cards. */
+        border: round $surface-lighten-2;
+    }
+    #filter:focus {
+        border: round $accent;
+    }
+    #actions {
+        /* Docked right and auto-width, so the cluster reserves its full size
+           (buttons + gaps) before the 1fr filter divides up the remainder.
+           This is what keeps ⚙ on-screen at every width. */
+        dock: right;
+        width: auto;
+        height: auto;
     }
     #sort-open, #scope, #settings-open {
         min-width: 0;
         height: 3;
-        margin-left: 1;
+        /* 2, not 1: at 1 the search box and the three controls read as one
+           crowded strip. The wider gap separates the filter from its buttons
+           and the buttons from each other. */
+        margin-left: 2;
     }
     #scope-notice {
         display: none;
@@ -773,9 +799,14 @@ class VaultApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="toolbar"):
             yield Input(placeholder="type to filter…", id="filter")
-            yield Button(self._sort_label(), id="sort-open")
-            yield Button(self._scope_label(), id="scope")
-            yield Button("⚙", id="settings-open")
+            # The buttons live in their own right-docked group so the cluster
+            # reserves its full width up front. Left as bare siblings of a 1fr
+            # Input, their margins aren't counted in the fr calc and the last
+            # button (⚙) overflows off the right edge on any width.
+            with Horizontal(id="actions"):
+                yield Button(self._sort_label(), id="sort-open")
+                yield Button(self._scope_label(), id="scope")
+                yield Button("⚙", id="settings-open")
         # Outside #cards, which is a grid: a notice mounted in there would be
         # laid out as one narrow grid cell instead of a full-width line.
         yield Static("", id="scope-notice")
